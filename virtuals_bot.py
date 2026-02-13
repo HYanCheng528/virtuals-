@@ -1657,6 +1657,12 @@ class VirtualsBot:
         job = self.scan_jobs[job_id]
         async with self.scan_lock:
             try:
+                if job.get("cancelRequested") or job.get("status") == "canceled":
+                    job["status"] = "canceled"
+                    job["finishedAt"] = int(time.time())
+                    job["error"] = "canceled by user"
+                    return
+
                 job["status"] = "running"
                 job["startedAt"] = int(time.time())
                 scan_rpc = self.backfill_http_rpc
@@ -1687,9 +1693,13 @@ class VirtualsBot:
                 job["processedTx"] = 0
                 parsed_before = int(self.stats.get("parsed_events", 0))
                 inserted_before = int(self.stats.get("inserted_events", 0))
+                canceled = False
 
                 current = from_block
                 while current <= to_block and not self.stop_event.is_set():
+                    if job.get("cancelRequested"):
+                        canceled = True
+                        break
                     end_block = min(to_block, current + chunk - 1)
                     txs = await self.fetch_backfill_txhashes(
                         current, end_block, launch_configs, rpc=scan_rpc
@@ -1704,6 +1714,9 @@ class VirtualsBot:
                             todo_list = [x for x in tx_list if x not in known]
 
                     for tx_hash in todo_list:
+                        if job.get("cancelRequested"):
+                            canceled = True
+                            break
                         await self.process_tx(
                             tx_hash,
                             end_block,
@@ -1711,6 +1724,8 @@ class VirtualsBot:
                             rpc=scan_rpc,
                         )
                         job["processedTx"] = int(job.get("processedTx", 0)) + 1
+                    if canceled:
+                        break
                     if project and todo_list:
                         self.storage.mark_backfill_scanned_txs(project, todo_list)
                     await self.flush_once(force=True)
@@ -1723,7 +1738,12 @@ class VirtualsBot:
                 inserted_after = int(self.stats.get("inserted_events", 0))
                 job["parsedDelta"] = max(0, parsed_after - parsed_before)
                 job["insertedDelta"] = max(0, inserted_after - inserted_before)
-                job["status"] = "done"
+                if canceled:
+                    job["status"] = "canceled"
+                    job["error"] = "canceled by user"
+                    job["canceledAt"] = int(time.time())
+                else:
+                    job["status"] = "done"
                 job["finishedAt"] = int(time.time())
             except Exception as e:
                 job["status"] = "failed"
@@ -1806,6 +1826,7 @@ class VirtualsBot:
             "startTs": start_ts,
             "endTs": end_ts,
             "createdAt": int(time.time()),
+            "cancelRequested": False,
         }
         asyncio.create_task(self.run_scan_range_job(job_id, project, start_ts, end_ts))
         return web.json_response({"ok": True, "jobId": job_id})
@@ -1816,6 +1837,25 @@ class VirtualsBot:
         if not job:
             return web.json_response({"error": "job not found"}, status=404)
         return web.json_response(job)
+
+    async def scan_job_cancel_handler(self, request: web.Request) -> web.Response:
+        job_id = str(request.match_info.get("job_id", "")).strip()
+        job = self.scan_jobs.get(job_id)
+        if not job:
+            return web.json_response({"error": "job not found"}, status=404)
+
+        status = str(job.get("status") or "")
+        if status in {"done", "failed", "canceled"}:
+            return web.json_response({"ok": True, "alreadyFinal": True, "job": job})
+
+        job["cancelRequested"] = True
+        job["cancelRequestedAt"] = int(time.time())
+        if status == "queued":
+            job["status"] = "canceled"
+            job["error"] = "canceled by user"
+            job["canceledAt"] = int(time.time())
+            job["finishedAt"] = int(time.time())
+        return web.json_response({"ok": True, "job": job})
 
     async def launch_configs_handler(self, request: web.Request) -> web.Response:
         rows = self.storage.list_launch_configs()
@@ -1983,6 +2023,7 @@ class VirtualsBot:
         app.router.add_delete("/launch-configs/{name}", self.launch_config_delete_handler)
         app.router.add_post("/scan-range", self.scan_range_handler)
         app.router.add_get("/scan-jobs/{job_id}", self.scan_job_detail_handler)
+        app.router.add_post("/scan-jobs/{job_id}/cancel", self.scan_job_cancel_handler)
         app.router.add_get("/health", self.health_handler)
         app.router.add_get("/mywallets", self.wallets_handler)
         app.router.add_get("/mywallets/{addr}", self.wallet_detail_handler)

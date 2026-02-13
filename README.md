@@ -42,6 +42,7 @@ python virtuals_bot.py --config ./config.json
 ## 启动后查看
 - Dashboard: `http://127.0.0.1:8080/`
 - 健康检查: `http://127.0.0.1:8080/health`
+- v1.5.0 详细使用教程：`RELEASE_v1.5.0_使用说明.md`
 
 ## 输出位置
 - SQLite: `SQLITE_PATH`

@@ -367,6 +367,7 @@
         <input id="scanStartUtc8" type="datetime-local" class="pill-input" />
         <input id="scanEndUtc8" type="datetime-local" class="pill-input" />
         <button id="scanRangeBtn" class="pill">按区间回扫(UTC+8)</button>
+        <button id="scanCancelBtn" class="pill" disabled>取消回扫</button>
         <button id="refreshBtn" class="pill">刷新</button>
         <button id="fastModeBtn" class="pill">极速模式：关(1s)</button>
         <span id="refreshMessage" class="hint">-</span>
@@ -508,6 +509,7 @@
     const scanStartUtc8 = document.getElementById("scanStartUtc8");
     const scanEndUtc8 = document.getElementById("scanEndUtc8");
     const scanRangeBtn = document.getElementById("scanRangeBtn");
+    const scanCancelBtn = document.getElementById("scanCancelBtn");
     const minuteStartUtc8 = document.getElementById("minuteStartUtc8");
     const minuteEndUtc8 = document.getElementById("minuteEndUtc8");
     const minuteRangeBtn = document.getElementById("minuteRangeBtn");
@@ -543,6 +545,7 @@
     let resizeRefreshTimer = null;
     let autoRefreshMs = NORMAL_REFRESH_MS;
     let autoRefreshTimer = null;
+    let currentScanJobId = null;
 
     const toNum = (v) => {
       const n = Number(v);
@@ -892,6 +895,12 @@
           await refreshAllSafe();
           return true;
         }
+        if (status === "canceled") {
+          refreshMessage.textContent = `回扫任务 ${jobId} 已取消`;
+          await loadMeta();
+          await refreshAllSafe();
+          return false;
+        }
         if (status === "failed") {
           throw new Error(job.error || "回扫失败");
         }
@@ -919,8 +928,35 @@
       if (!jobId) {
         throw new Error("回扫任务创建失败");
       }
+      currentScanJobId = jobId;
+      scanCancelBtn.disabled = false;
       refreshMessage.textContent = `回扫任务已创建：${jobId}，开始执行...`;
-      await pollScanJob(jobId);
+      try {
+        const ok = await pollScanJob(jobId);
+        return ok;
+      } finally {
+        if (currentScanJobId === jobId) {
+          currentScanJobId = null;
+          scanCancelBtn.disabled = true;
+        }
+      }
+    }
+
+    async function cancelScanRangeJob() {
+      if (!currentScanJobId) {
+        throw new Error("当前没有可取消的回扫任务");
+      }
+      const jobId = currentScanJobId;
+      const resp = await requestJsonWithBody(
+        `/scan-jobs/${encodeURIComponent(jobId)}/cancel`,
+        "POST",
+        {}
+      );
+      if (resp?.alreadyFinal) {
+        refreshMessage.textContent = `任务 ${jobId} 已结束`;
+        return false;
+      }
+      refreshMessage.textContent = `已发送取消请求：${jobId}`;
       return true;
     }
 
@@ -1220,6 +1256,14 @@
         scanRangeBtn,
         { loading: "回扫中...", success: "回扫完成", failed: "回扫失败" },
         scanRangeByUtc8,
+        refreshMessage
+      ).catch(console.error);
+    });
+    scanCancelBtn.addEventListener("click", () => {
+      runButtonAction(
+        scanCancelBtn,
+        { loading: "取消中...", success: "已请求取消", failed: "取消失败" },
+        cancelScanRangeJob,
         refreshMessage
       ).catch(console.error);
     });
