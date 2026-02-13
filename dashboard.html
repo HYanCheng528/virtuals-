@@ -1,0 +1,1270 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Virtuals 实时监控面板 v1.1</title>
+  <style>
+    :root {
+      --bg-0: #081425;
+      --bg-1: #0f2340;
+      --ink: #eaf2ff;
+      --muted: #9ab1d1;
+      --card: rgba(12, 30, 56, 0.75);
+      --line: rgba(150, 190, 255, 0.35);
+      --accent-a: #4ecdc4;
+      --accent-b: #ffd166;
+      --accent-c: #ff7b54;
+      --ok: #4caf87;
+      --warn: #ffca62;
+      --bad: #ff6d6d;
+      --mono: "Cascadia Mono", "JetBrains Mono", "Consolas", monospace;
+      --sans: "Bahnschrift", "Aptos", "Trebuchet MS", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      overflow-y: scroll;
+      scrollbar-gutter: stable both-edges;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 500px at -10% -10%, #254878 0%, transparent 50%),
+        radial-gradient(900px 500px at 110% 0%, #4f2a4f 0%, transparent 55%),
+        linear-gradient(130deg, var(--bg-0), var(--bg-1));
+      min-height: 100vh;
+      padding: 20px;
+      overflow-x: hidden;
+    }
+
+    .shell {
+      width: min(100%, 1400px);
+      max-width: 1400px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+      min-width: 0;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 10px 2px;
+    }
+
+    .title {
+      font-size: 28px;
+      letter-spacing: 1px;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .minute-range-controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .pill {
+      border: 1px solid var(--line);
+      background: rgba(16, 35, 66, 0.6);
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 14px;
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .pill[disabled] {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .pill-input {
+      border: 1px solid var(--line);
+      background: rgba(16, 35, 66, 0.6);
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      min-width: 170px;
+    }
+
+    .minute-range-controls .pill-input {
+      min-width: 165px;
+    }
+
+    .pill:focus {
+      outline: 2px solid var(--accent-a);
+      outline-offset: 1px;
+    }
+
+    select.pill {
+      padding-right: 28px;
+    }
+
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+      padding: 14px;
+      animation: fadeUp 360ms ease both;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .kpi-title {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+
+    .kpi-value {
+      font-family: var(--mono);
+      font-size: 21px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .status {
+      display: inline-block;
+      font-size: 12px;
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-family: var(--mono);
+      border: 1px solid transparent;
+    }
+
+    .ok {
+      color: #c9ffe8;
+      border-color: rgba(118, 255, 196, 0.5);
+      background: rgba(26, 100, 67, 0.35);
+    }
+
+    .bad {
+      color: #ffd6d6;
+      border-color: rgba(255, 143, 143, 0.5);
+      background: rgba(125, 30, 30, 0.35);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 12px;
+    }
+
+    .section-title {
+      font-size: 14px;
+      margin-bottom: 10px;
+      color: var(--muted);
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+    }
+
+    .chart-wrap {
+      background: rgba(8, 18, 35, 0.48);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      overflow-x: auto;
+      overflow-y: hidden;
+    }
+
+    canvas {
+      width: 100%;
+      height: 320px;
+      display: block;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      max-height: 350px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field label {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+    }
+
+    .field input {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: rgba(16, 35, 66, 0.6);
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .field input:focus {
+      outline: 2px solid var(--accent-a);
+      outline-offset: 1px;
+    }
+
+    .form-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      font-family: var(--mono);
+      overflow-wrap: anywhere;
+    }
+
+    #refreshMessage {
+      display: inline-block;
+      max-width: min(54vw, 680px);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: bottom;
+    }
+
+    .copy-btn {
+      margin-left: 6px;
+      border: 1px solid rgba(136, 169, 214, 0.45);
+      background: rgba(16, 35, 66, 0.55);
+      color: var(--ink);
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-size: 11px;
+      line-height: 1.4;
+      cursor: pointer;
+      font-family: var(--mono);
+    }
+
+    .copy-btn:hover {
+      border-color: rgba(136, 169, 214, 0.75);
+      background: rgba(16, 35, 66, 0.8);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 800px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    th, td {
+      border-bottom: 1px solid rgba(136, 169, 214, 0.23);
+      padding: 8px 10px;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: rgba(5, 16, 34, 0.95);
+      z-index: 1;
+      color: #c8dcff;
+    }
+
+    tr:nth-child(2n) td {
+      background: rgba(255, 255, 255, 0.015);
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    @keyframes fadeUp {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 1100px) {
+      .grid-4 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .grid-2 {
+        grid-template-columns: 1fr;
+      }
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
+      table {
+        min-width: 640px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="header">
+      <div>
+        <div class="title">Virtuals 实时监控面板</div>
+        <div class="subtitle">v1.1 | 链上价格 | 无 Supabase 热路径</div>
+      </div>
+      <div class="controls">
+        <select id="projectSelect" class="pill"></select>
+        <input id="scanStartUtc8" type="datetime-local" class="pill-input" />
+        <input id="scanEndUtc8" type="datetime-local" class="pill-input" />
+        <button id="scanRangeBtn" class="pill">按区间回扫(UTC+8)</button>
+        <button id="refreshBtn" class="pill">刷新</button>
+        <button id="fastModeBtn" class="pill">极速模式：关(1s)</button>
+        <span id="refreshMessage" class="hint">-</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">项目配置管理（仅可修改 name / 内盘地址）</div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="lcName">name（项目名）</label>
+          <input id="lcName" placeholder="例如 WORK2" />
+        </div>
+        <div class="field">
+          <label for="lcInternalPool">internal_pool_addr（必填）</label>
+          <input id="lcInternalPool" placeholder="0x..." />
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <label class="hint">
+          <input id="lcSwitchOnly" type="checkbox" />
+          仅监控当前项目（停用其它项目监听，历史数据保留）
+        </label>
+        <button id="saveConfigBtn" class="pill">保存/切换项目</button>
+        <button id="deleteConfigBtn" class="pill">删除项目</button>
+        <span id="fixedInfo" class="hint">固定参数：加载中...</span>
+        <span id="lcMessage" class="hint">-</span>
+      </div>
+
+      <div class="table-wrap">
+        <table id="launchConfigTable">
+          <thead>
+            <tr>
+              <th>项目</th>
+              <th>内盘地址</th>
+              <th>启用</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid-4">
+      <div class="card">
+        <div class="kpi-title">连接状态</div>
+        <div id="wsStatus" class="kpi-value">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">价格 (VIRTUAL/USD)</div>
+        <div id="priceValue" class="kpi-value">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">队列 / 待处理</div>
+        <div id="queueValue" class="kpi-value">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">已解析 / 已入库</div>
+        <div id="parsedValue" class="kpi-value">-</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">分钟消耗 SpentV（柱状图）</div>
+      <div class="minute-range-controls">
+        <input id="minuteStartUtc8" type="datetime-local" class="pill-input" />
+        <input id="minuteEndUtc8" type="datetime-local" class="pill-input" />
+        <button id="minuteRangeBtn" class="pill">应用分钟区间(UTC+8)</button>
+        <span id="minuteRangeMessage" class="hint">-</span>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="minuteChart"></canvas>
+      </div>
+      <div id="minuteMeta" class="muted" style="margin-top:8px;font-family:var(--mono);font-size:12px;">-</div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">大户榜</div>
+      <div class="table-wrap">
+        <table id="leaderTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>买家地址</th>
+              <th>累计估算花费V</th>
+              <th>累计买入代币</th>
+              <th>FDV_USD</th>
+              <th>最近交易时间</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+
+    <section class="card">
+      <div class="section-title">我的钱包持仓</div>
+      <div class="table-wrap">
+        <table id="walletTable">
+          <thead>
+            <tr>
+              <th>项目</th>
+              <th>钱包地址</th>
+              <th>代币地址</th>
+              <th>累计花费V</th>
+              <th>累计代币数量</th>
+              <th>FDV_USD</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">交易录入延迟</div>
+      <div class="table-wrap">
+        <table id="txDelayTable">
+          <thead>
+            <tr>
+              <th>交易哈希</th>
+              <th>交易产生时间</th>
+              <th>录入时间</th>
+              <th>时间差(秒)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+
+  <script>
+    const projectSelect = document.getElementById("projectSelect");
+    const scanStartUtc8 = document.getElementById("scanStartUtc8");
+    const scanEndUtc8 = document.getElementById("scanEndUtc8");
+    const scanRangeBtn = document.getElementById("scanRangeBtn");
+    const minuteStartUtc8 = document.getElementById("minuteStartUtc8");
+    const minuteEndUtc8 = document.getElementById("minuteEndUtc8");
+    const minuteRangeBtn = document.getElementById("minuteRangeBtn");
+    const minuteRangeMessage = document.getElementById("minuteRangeMessage");
+    const refreshBtn = document.getElementById("refreshBtn");
+    const fastModeBtn = document.getElementById("fastModeBtn");
+    const refreshMessage = document.getElementById("refreshMessage");
+    const wsStatus = document.getElementById("wsStatus");
+    const priceValue = document.getElementById("priceValue");
+    const queueValue = document.getElementById("queueValue");
+    const parsedValue = document.getElementById("parsedValue");
+    const minuteMeta = document.getElementById("minuteMeta");
+    const walletBody = document.querySelector("#walletTable tbody");
+    const leaderBody = document.querySelector("#leaderTable tbody");
+    const txDelayBody = document.querySelector("#txDelayTable tbody");
+    const launchConfigBody = document.querySelector("#launchConfigTable tbody");
+    const chart = document.getElementById("minuteChart");
+    const ctx = chart.getContext("2d");
+    const lcName = document.getElementById("lcName");
+    const lcInternalPool = document.getElementById("lcInternalPool");
+    const lcSwitchOnly = document.getElementById("lcSwitchOnly");
+    const saveConfigBtn = document.getElementById("saveConfigBtn");
+    const deleteConfigBtn = document.getElementById("deleteConfigBtn");
+    const fixedInfo = document.getElementById("fixedInfo");
+    const lcMessage = document.getElementById("lcMessage");
+    const FAST_MODE_STORAGE_KEY = "virtuals_fast_mode";
+    const NORMAL_REFRESH_MS = 1000;
+    const FAST_REFRESH_MS = 500;
+    let minuteRangeApplied = null;
+    let lastChartCssWidth = "";
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    let resizeRefreshTimer = null;
+    let autoRefreshMs = NORMAL_REFRESH_MS;
+    let autoRefreshTimer = null;
+
+    const toNum = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    function fmtNum(v, digits = 6) {
+      if (v === null || v === undefined) return "-";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v);
+      return n.toLocaleString("zh-CN", { maximumFractionDigits: digits });
+    }
+
+    function shortAddr(addr) {
+      if (!addr || addr.length < 12) return addr || "-";
+      return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+    }
+
+    function shortHash(tx) {
+      if (!tx || tx.length < 18) return tx || "-";
+      return `${tx.slice(0, 10)}...${tx.slice(-8)}`;
+    }
+
+    function escAttr(v) {
+      return String(v ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function copyBtnHtml(text) {
+      if (!text) return "";
+      return `<button class="copy-btn" type="button" data-copy="${escAttr(text)}">复制</button>`;
+    }
+
+    function addrWithCopyHtml(addr) {
+      if (!addr) return "-";
+      const full = String(addr);
+      return `<span title="${escAttr(full)}">${shortAddr(full)}</span>${copyBtnHtml(full)}`;
+    }
+
+    function hashWithCopyHtml(tx) {
+      if (!tx) return "-";
+      const full = String(tx);
+      return `<span title="${escAttr(full)}">${shortHash(full)}</span>${copyBtnHtml(full)}`;
+    }
+
+    function fmtTs(ts) {
+      if (!ts) return "-";
+      const d = new Date(Number(ts) * 1000);
+      if (Number.isNaN(d.getTime())) return String(ts);
+      return d.toLocaleString();
+    }
+
+    function fmtHm(ts) {
+      if (!ts) return "-";
+      const d = new Date((Number(ts) + 8 * 3600) * 1000);
+      if (Number.isNaN(d.getTime())) return String(ts);
+      const hh = String(d.getUTCHours()).padStart(2, "0");
+      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      return `${hh}:${mm}`;
+    }
+
+    function fmtYmdHm(ts) {
+      if (!ts) return "-";
+      const d = new Date((Number(ts) + 8 * 3600) * 1000);
+      if (Number.isNaN(d.getTime())) return String(ts);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      const hh = String(d.getUTCHours()).padStart(2, "0");
+      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      return `${y}/${m}/${day} ${hh}:${mm}`;
+    }
+
+    function tsToUtc8DatetimeLocal(ts) {
+      const d = new Date((Number(ts) + 8 * 3600) * 1000);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      const hh = String(d.getUTCHours()).padStart(2, "0");
+      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      return `${y}-${m}-${day}T${hh}:${mm}`;
+    }
+
+    function parseUtc8DatetimeLocalToTs(v) {
+      const m = String(v || "").match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+      if (!m) return null;
+      const y = Number(m[1]);
+      const mo = Number(m[2]);
+      const d = Number(m[3]);
+      const hh = Number(m[4]);
+      const mm = Number(m[5]);
+      const utcMs = Date.UTC(y, mo - 1, d, hh - 8, mm, 0, 0);
+      return Math.floor(utcMs / 1000);
+    }
+
+    async function jget(url) {
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) throw new Error(`${r.status} ${url}`);
+      return await r.json();
+    }
+
+    function loadFastMode() {
+      try {
+        return localStorage.getItem(FAST_MODE_STORAGE_KEY) === "1";
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function saveFastMode(enabled) {
+      try {
+        localStorage.setItem(FAST_MODE_STORAGE_KEY, enabled ? "1" : "0");
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    function restartAutoRefreshTimer() {
+      if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+      }
+      autoRefreshTimer = setInterval(() => refreshAllSafe().catch(console.error), autoRefreshMs);
+    }
+
+    function applyFastMode(enabled) {
+      autoRefreshMs = enabled ? FAST_REFRESH_MS : NORMAL_REFRESH_MS;
+      fastModeBtn.textContent = enabled ? "极速模式：开(0.5s)" : "极速模式：关(1s)";
+      restartAutoRefreshTimer();
+    }
+
+    async function copyText(text) {
+      const val = String(text || "");
+      if (!val) return false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(val);
+          return true;
+        }
+      } catch (e) {
+        // fallthrough
+      }
+      const ta = document.createElement("textarea");
+      ta.value = val;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } catch (e) {
+        ok = false;
+      }
+      ta.remove();
+      return ok;
+    }
+
+    async function loadMeta() {
+      const meta = await jget("/meta");
+      const current = projectSelect.value;
+      projectSelect.innerHTML = "";
+      for (const p of meta.projects || []) {
+        const opt = document.createElement("option");
+        opt.value = p;
+        opt.textContent = p;
+        projectSelect.appendChild(opt);
+      }
+      if (current && (meta.projects || []).includes(current)) {
+        projectSelect.value = current;
+      } else if (meta.projects && meta.projects.length) {
+        projectSelect.value = meta.projects[0];
+      }
+      if (meta.fixedDefaults) {
+        fixedInfo.innerHTML =
+          `固定参数：fee_addr=${addrWithCopyHtml(meta.fixedDefaults.fee_addr)} | ` +
+          `tax_addr=${addrWithCopyHtml(meta.fixedDefaults.tax_addr)} | ` +
+          `supply=${fmtNum(meta.fixedDefaults.token_total_supply, 0)} | ` +
+          `fee_rate=${fmtNum(meta.fixedDefaults.fee_rate, 6)}`;
+      }
+      return meta;
+    }
+
+    function initScanInputsIfEmpty() {
+      const now = Math.floor(Date.now() / 1000);
+      if (!scanEndUtc8.value) {
+        scanEndUtc8.value = tsToUtc8DatetimeLocal(now);
+      }
+      if (!scanStartUtc8.value) {
+        scanStartUtc8.value = tsToUtc8DatetimeLocal(now - 3600);
+      }
+    }
+
+    function initMinuteInputsIfEmpty() {
+      const now = Math.floor(Date.now() / 1000);
+      if (!minuteEndUtc8.value) {
+        minuteEndUtc8.value = tsToUtc8DatetimeLocal(now);
+      }
+      if (!minuteStartUtc8.value) {
+        minuteStartUtc8.value = tsToUtc8DatetimeLocal(now - 3600);
+      }
+      const startTs = parseUtc8DatetimeLocalToTs(minuteStartUtc8.value);
+      const endTs = parseUtc8DatetimeLocalToTs(minuteEndUtc8.value);
+      if (startTs && endTs && endTs >= startTs) {
+        minuteRangeApplied = { from: startTs, to: endTs };
+      }
+    }
+
+    function getMinuteRangeTs() {
+      if (minuteRangeApplied && minuteRangeApplied.to >= minuteRangeApplied.from) {
+        return minuteRangeApplied;
+      }
+      const startTs = parseUtc8DatetimeLocalToTs(minuteStartUtc8.value);
+      const endTs = parseUtc8DatetimeLocalToTs(minuteEndUtc8.value);
+      if (startTs && endTs && endTs >= startTs) {
+        minuteRangeApplied = { from: startTs, to: endTs };
+        return minuteRangeApplied;
+      }
+      const now = Math.floor(Date.now() / 1000);
+      return { from: now - 3600, to: now };
+    }
+
+    async function applyMinuteRange() {
+      const startTs = parseUtc8DatetimeLocalToTs(minuteStartUtc8.value);
+      const endTs = parseUtc8DatetimeLocalToTs(minuteEndUtc8.value);
+      if (!startTs || !endTs) {
+        throw new Error("请填写有效的分钟区间 UTC+8 时间");
+      }
+      if (endTs < startTs) {
+        throw new Error("分钟区间结束时间不能早于开始时间");
+      }
+      minuteRangeApplied = { from: startTs, to: endTs };
+      await refreshAllSafe();
+      minuteRangeMessage.textContent = `已应用分钟区间：${fmtTs(startTs)} ~ ${fmtTs(endTs)}`;
+      return true;
+    }
+
+    function fillLaunchForm(row) {
+      lcName.value = row.name || "";
+      lcInternalPool.value = row.internal_pool_addr || "";
+    }
+
+    function renderLaunchConfigTable(rows) {
+      launchConfigBody.innerHTML = "";
+      rows.forEach((r) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${r.name || "-"}</td>
+          <td>${addrWithCopyHtml(r.internal_pool_addr)}</td>
+          <td>${r.is_enabled ? "是" : "否"}</td>
+        `;
+        tr.style.cursor = "pointer";
+        tr.addEventListener("click", () => fillLaunchForm(r));
+        launchConfigBody.appendChild(tr);
+      });
+      if (!rows.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="3" class="muted">暂无项目配置。</td>`;
+        launchConfigBody.appendChild(tr);
+      }
+    }
+
+    async function loadLaunchConfigs() {
+      const data = await jget("/launch-configs");
+      const rows = data.items || [];
+      renderLaunchConfigTable(rows);
+      if (!lcName.value && rows.length) {
+        fillLaunchForm(rows[0]);
+      }
+      return rows;
+    }
+
+    async function requestJsonWithBody(url, method, payload) {
+      const resp = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: payload ? JSON.stringify(payload) : undefined
+      });
+      const raw = await resp.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (e) {
+        throw new Error(`接口返回非 JSON（可能后端版本未更新）：${raw.slice(0, 100)}`);
+      }
+      if (!resp.ok) {
+        throw new Error(data.error || `${method} 失败`);
+      }
+      return data;
+    }
+
+    async function saveLaunchConfig() {
+      const payload = {
+        name: lcName.value.trim(),
+        internal_pool_addr: lcInternalPool.value.trim(),
+        switch_only: lcSwitchOnly.checked,
+        is_enabled: true
+      };
+      const data = await requestJsonWithBody("/launch-configs", "POST", payload);
+      lcMessage.textContent = `保存成功，当前监控项目：${(data.monitoringProjects || []).join(", ") || "-"}`;
+      await loadMeta();
+      if (payload.name && [...projectSelect.options].some(o => o.value === payload.name)) {
+        projectSelect.value = payload.name;
+      }
+      renderLaunchConfigTable(data.items || []);
+      await refreshAllSafe();
+    }
+
+    async function deleteLaunchConfig() {
+      const name = lcName.value.trim();
+      if (!name) {
+        throw new Error("请先输入要删除的项目名");
+      }
+      const ok = confirm(`确认删除项目 ${name} ?\n仅删除配置，不删除历史统计数据。`);
+      if (!ok) {
+        lcMessage.textContent = "已取消删除";
+        return false;
+      }
+      const data = await requestJsonWithBody(`/launch-configs/${encodeURIComponent(name)}`, "DELETE");
+      lcMessage.textContent = `删除成功，当前监控项目：${(data.monitoringProjects || []).join(", ") || "无"}`;
+      await loadMeta();
+      renderLaunchConfigTable(data.items || []);
+      if (![...projectSelect.options].some(o => o.value === projectSelect.value) && projectSelect.options.length > 0) {
+        projectSelect.value = projectSelect.options[0].value;
+      }
+      if (projectSelect.value) {
+        const row = (data.items || []).find(x => x.name === projectSelect.value);
+        if (row) fillLaunchForm(row);
+      }
+      await refreshAllSafe();
+      return true;
+    }
+
+    async function pollScanJob(jobId) {
+      const started = Date.now();
+      while (Date.now() - started < 1000 * 60 * 20) {
+        const job = await jget(`/scan-jobs/${encodeURIComponent(jobId)}`);
+        const status = job.status || "-";
+        const chunkInfo = `${job.processedChunks || 0}/${job.totalChunks || 0}`;
+        refreshMessage.textContent =
+          `回扫任务 ${jobId} | 状态=${status} | 分块=${chunkInfo} | 扫描Tx=${job.scannedTx || 0} | 入库增量=${job.insertedDelta || 0}`;
+        if (status === "done") {
+          await loadMeta();
+          await refreshAllSafe();
+          return true;
+        }
+        if (status === "failed") {
+          throw new Error(job.error || "回扫失败");
+        }
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      throw new Error("回扫等待超时，请稍后手动刷新");
+    }
+
+    async function scanRangeByUtc8() {
+      const startTs = parseUtc8DatetimeLocalToTs(scanStartUtc8.value);
+      const endTs = parseUtc8DatetimeLocalToTs(scanEndUtc8.value);
+      if (!startTs || !endTs) {
+        throw new Error("请填写有效的 UTC+8 时间区间");
+      }
+      if (endTs < startTs) {
+        throw new Error("结束时间不能早于开始时间");
+      }
+      const project = projectSelect.value || null;
+      const create = await requestJsonWithBody("/scan-range", "POST", {
+        project,
+        start_ts: startTs,
+        end_ts: endTs,
+      });
+      const jobId = create.jobId;
+      if (!jobId) {
+        throw new Error("回扫任务创建失败");
+      }
+      refreshMessage.textContent = `回扫任务已创建：${jobId}，开始执行...`;
+      await pollScanJob(jobId);
+      return true;
+    }
+
+    function drawMinuteChart(rows) {
+      const dpr = window.devicePixelRatio || 1;
+      const wrap = chart.parentElement;
+      const baseW = Math.max(900, (wrap?.clientWidth || chart.clientWidth || 900));
+      const h = chart.clientHeight || 320;
+      const w = rows.length ? Math.max(baseW, 84 + rows.length * 52) : baseW;
+      const cssWidth = `${w}px`;
+      if (lastChartCssWidth !== cssWidth) {
+        chart.style.width = cssWidth;
+        lastChartCssWidth = cssWidth;
+      }
+      const pixelW = Math.floor(w * dpr);
+      const pixelH = Math.floor(h * dpr);
+      if (chart.width !== pixelW || chart.height !== pixelH) {
+        chart.width = pixelW;
+        chart.height = pixelH;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "rgba(10, 25, 48, 0.9)";
+      ctx.fillRect(0, 0, w, h);
+
+      if (!rows.length) {
+        ctx.fillStyle = "#9ab1d1";
+        ctx.font = "13px Cascadia Mono, monospace";
+        ctx.fillText("暂无分钟级数据", 12, 24);
+        return;
+      }
+
+      const points = rows.map(x => ({
+        x: Number(x.minute_key),
+        y: toNum(x.minute_spent_v)
+      }));
+      const maxY = Math.max(...points.map(p => p.y), 1e-12);
+
+      const padL = 56;
+      const padR = 16;
+      const padT = 26;
+      const padB = 58;
+      const cw = w - padL - padR;
+      const ch = h - padT - padB;
+
+      ctx.strokeStyle = "rgba(122, 166, 223, 0.25)";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = padT + (ch * i) / 4;
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(w - padR, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#9ab1d1";
+      ctx.font = "11px Cascadia Mono, monospace";
+      for (let i = 0; i <= 4; i++) {
+        const value = maxY * (1 - i / 4);
+        const y = padT + (ch * i) / 4;
+        ctx.fillText(fmtNum(value, 4), 6, y + 4);
+      }
+
+      const slot = cw / Math.max(points.length, 1);
+      const barW = Math.max(4, Math.min(24, slot * 0.72));
+      const labelStep = points.length > 120 ? Math.ceil(points.length / 120) : 1;
+
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        const barH = Math.max(1, (p.y / maxY) * ch);
+        const x = padL + i * slot + (slot - barW) / 2;
+        const y = padT + ch - barH;
+
+        const grad = ctx.createLinearGradient(0, y, 0, y + barH);
+        grad.addColorStop(0, "rgba(78, 205, 196, 0.95)");
+        grad.addColorStop(1, "rgba(78, 205, 196, 0.35)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(x, y, barW, barH);
+
+        ctx.strokeStyle = "rgba(78, 205, 196, 0.75)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, barW - 1), Math.max(0, barH - 1));
+
+        if (i % labelStep === 0 || i === points.length - 1) {
+          ctx.fillStyle = "#ffd166";
+          ctx.font = "10px Cascadia Mono, monospace";
+          const labelY = Math.max(10, y - 4);
+          ctx.fillText(fmtNum(p.y, 4), x + barW / 2, labelY);
+        }
+      }
+
+      ctx.fillStyle = "#9ab1d1";
+      ctx.font = "10px Cascadia Mono, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      for (let i = 0; i < points.length; i++) {
+        const x = padL + i * slot + slot / 2;
+        const label = i === 0 ? fmtYmdHm(points[i].x) : fmtHm(points[i].x);
+        ctx.fillText(label, x, h - 20);
+      }
+      ctx.textAlign = "start";
+    }
+
+    function renderWalletTable(rows) {
+      walletBody.innerHTML = "";
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${r.project || "-"}</td>
+          <td>${addrWithCopyHtml(r.wallet)}</td>
+          <td>${addrWithCopyHtml(r.token_addr)}</td>
+          <td>${fmtNum(r.sum_spent_v_est, 6)}</td>
+          <td>${fmtNum(r.sum_token_bought, 6)}</td>
+          <td>${fmtNum(r.breakeven_fdv_usd, 4)}</td>
+          <td>${fmtTs(r.updated_at)}</td>
+        `;
+        walletBody.appendChild(tr);
+      }
+      if (!rows.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7" class="muted">暂无钱包持仓数据。</td>`;
+        walletBody.appendChild(tr);
+      }
+    }
+
+    function renderLeaderTable(rows) {
+      leaderBody.innerHTML = "";
+      rows.forEach((r, idx) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${idx + 1}</td>
+          <td>${addrWithCopyHtml(r.buyer)}</td>
+          <td>${fmtNum(r.sum_spent_v_est, 6)}</td>
+          <td>${fmtNum(r.sum_token_bought, 6)}</td>
+          <td>${fmtNum(r.breakeven_fdv_usd, 4)}</td>
+          <td>${fmtTs(r.last_tx_time)}</td>
+        `;
+        leaderBody.appendChild(tr);
+      });
+      if (!rows.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6" class="muted">暂无大户榜数据。</td>`;
+        leaderBody.appendChild(tr);
+      }
+    }
+
+    function renderTxDelayTable(rows) {
+      txDelayBody.innerHTML = "";
+      rows.forEach((r) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${hashWithCopyHtml(r.tx_hash)}</td>
+          <td>${fmtTs(r.block_timestamp)}</td>
+          <td>${fmtTs(r.recorded_at)}</td>
+          <td>${fmtNum(r.delay_sec, 0)}</td>
+        `;
+        txDelayBody.appendChild(tr);
+      });
+      if (!rows.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="4" class="muted">暂无交易录入延迟数据。</td>`;
+        txDelayBody.appendChild(tr);
+      }
+    }
+
+    async function refreshAll() {
+      const project = projectSelect.value;
+      const range = getMinuteRangeTs();
+      const from = range.from;
+      const to = range.to;
+      const walletUrl = project
+        ? `/mywallets?project=${encodeURIComponent(project)}`
+        : "/mywallets";
+      const tasks = [
+        jget("/health"),
+        jget(walletUrl),
+      ];
+      if (project) {
+        tasks.push(jget(`/minutes?project=${encodeURIComponent(project)}&from=${from}&to=${to}`));
+        tasks.push(jget(`/leaderboard?project=${encodeURIComponent(project)}&top=20`));
+        tasks.push(jget(`/event-delays?project=${encodeURIComponent(project)}&limit=80`));
+      } else {
+        tasks.push(Promise.resolve({ items: [] }));
+        tasks.push(Promise.resolve({ items: [] }));
+        tasks.push(Promise.resolve({ items: [] }));
+      }
+      const [health, wallets, minutes, leader, txDelays] = await Promise.all(tasks);
+
+      wsStatus.innerHTML = health.stats?.ws_connected
+        ? `<span class="status ok">已连接</span>`
+        : `<span class="status bad">未连接</span>`;
+      priceValue.textContent = fmtNum(health.price, 12);
+      queueValue.textContent = `${health.queueSize} / ${health.pendingTx}`;
+      parsedValue.textContent = `${health.stats?.parsed_events || 0} / ${health.stats?.inserted_events || 0}`;
+
+      const minuteRows = minutes.items || [];
+      drawMinuteChart(minuteRows);
+      minuteMeta.textContent = `项目=${project || "-"} | 点数=${minuteRows.length} | 从=${fmtTs(from)} | 到=${fmtTs(to)}`;
+
+      renderWalletTable(wallets.items || []);
+      renderLeaderTable(leader.items || []);
+      renderTxDelayTable(txDelays.items || []);
+    }
+
+    async function refreshAllSafe() {
+      if (refreshInFlight) {
+        refreshQueued = true;
+        return false;
+      }
+      refreshInFlight = true;
+      try {
+        await refreshAll();
+        return true;
+      } finally {
+        refreshInFlight = false;
+        if (refreshQueued) {
+          refreshQueued = false;
+          setTimeout(() => refreshAllSafe().catch(console.error), 0);
+        }
+      }
+    }
+
+    async function boot() {
+      try {
+        initScanInputsIfEmpty();
+        initMinuteInputsIfEmpty();
+        await loadMeta();
+        await loadLaunchConfigs();
+        await refreshAllSafe();
+        const minuteRange = getMinuteRangeTs();
+        minuteRangeMessage.textContent = `当前分钟区间：${fmtTs(minuteRange.from)} ~ ${fmtTs(minuteRange.to)}`;
+        refreshMessage.textContent = "已就绪";
+      } catch (e) {
+        wsStatus.innerHTML = `<span class="status bad">初始化失败</span>`;
+        lcMessage.textContent = String(e.message || e);
+        refreshMessage.textContent = `初始化失败：${e.message || e}`;
+        console.error(e);
+      }
+    }
+
+    async function runButtonAction(button, texts, action, messageEl) {
+      const old = button.textContent;
+      button.disabled = true;
+      button.textContent = texts.loading;
+      try {
+        const result = await action();
+        if (result === false) {
+          button.textContent = old;
+          return;
+        }
+        button.textContent = texts.success;
+      } catch (e) {
+        button.textContent = texts.failed;
+        if (messageEl) {
+          messageEl.textContent = `${texts.failed}：${e.message || e}`;
+        }
+      } finally {
+        setTimeout(() => {
+          button.disabled = false;
+          button.textContent = old;
+        }, 900);
+      }
+    }
+
+    document.addEventListener("click", async (ev) => {
+      const btn = ev.target.closest(".copy-btn");
+      if (!btn) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const text = btn.getAttribute("data-copy") || "";
+      if (!text) return;
+      const ok = await copyText(text);
+      const old = btn.textContent;
+      btn.textContent = ok ? "已复制" : "失败";
+      refreshMessage.textContent = ok ? `已复制：${shortHash(text)}` : "复制失败";
+      setTimeout(() => {
+        btn.textContent = old || "复制";
+      }, 900);
+    });
+
+    refreshBtn.addEventListener("click", () => {
+      runButtonAction(
+        refreshBtn,
+        { loading: "刷新中...", success: "已刷新", failed: "刷新失败" },
+        async () => {
+          await refreshAllSafe();
+          refreshMessage.textContent = `刷新成功：${new Date().toLocaleTimeString()}`;
+        },
+        refreshMessage
+      ).catch(console.error);
+    });
+    scanRangeBtn.addEventListener("click", () => {
+      runButtonAction(
+        scanRangeBtn,
+        { loading: "回扫中...", success: "回扫完成", failed: "回扫失败" },
+        scanRangeByUtc8,
+        refreshMessage
+      ).catch(console.error);
+    });
+    minuteRangeBtn.addEventListener("click", () => {
+      runButtonAction(
+        minuteRangeBtn,
+        { loading: "应用中...", success: "已应用", failed: "应用失败" },
+        applyMinuteRange,
+        minuteRangeMessage
+      ).catch(console.error);
+    });
+    projectSelect.addEventListener("change", () => refreshAllSafe().catch(console.error));
+    saveConfigBtn.addEventListener("click", () => {
+      runButtonAction(
+        saveConfigBtn,
+        { loading: "保存中...", success: "已保存", failed: "保存失败" },
+        saveLaunchConfig,
+        lcMessage
+      ).catch(console.error);
+    });
+    deleteConfigBtn.addEventListener("click", () => {
+      runButtonAction(
+        deleteConfigBtn,
+        { loading: "删除中...", success: "已删除", failed: "删除失败" },
+        deleteLaunchConfig,
+        lcMessage
+      ).catch(console.error);
+    });
+    fastModeBtn.addEventListener("click", () => {
+      const enabled = autoRefreshMs !== FAST_REFRESH_MS;
+      saveFastMode(enabled);
+      applyFastMode(enabled);
+      refreshMessage.textContent = enabled ? "极速模式已开启：0.5秒刷新" : "极速模式已关闭：1秒刷新";
+    });
+    window.addEventListener("resize", () => {
+      if (resizeRefreshTimer) {
+        clearTimeout(resizeRefreshTimer);
+      }
+      resizeRefreshTimer = setTimeout(() => {
+        refreshAllSafe().catch(console.error);
+      }, 200);
+    });
+
+    applyFastMode(loadFastMode());
+    boot();
+  </script>
+</body>
+</html>
