@@ -80,6 +80,7 @@ class AppConfig:
     chain_id: int
     ws_rpc_url: str
     http_rpc_url: str
+    backfill_http_rpc_url: Optional[str]
     virtual_token_addr: str
     fee_rate_default: Decimal
     total_supply_default: Decimal
@@ -118,6 +119,8 @@ def load_config(path: str) -> AppConfig:
     chain_id = int(raw.get("CHAIN_ID", 8453))
     ws_rpc_url = str(raw["WS_RPC_URL"]).strip()
     http_rpc_url = str(raw["HTTP_RPC_URL"]).strip()
+    backfill_http_rpc_url_raw = str(raw.get("BACKFILL_HTTP_RPC_URL", "")).strip()
+    backfill_http_rpc_url = backfill_http_rpc_url_raw or None
     virtual_token_addr = normalize_address(raw["VIRTUAL_TOKEN_ADDR"])
 
     fee_rate_default = Decimal(str(raw.get("FEE_RATE_DEFAULT", "0.01")))
@@ -161,6 +164,7 @@ def load_config(path: str) -> AppConfig:
         chain_id=chain_id,
         ws_rpc_url=ws_rpc_url,
         http_rpc_url=http_rpc_url,
+        backfill_http_rpc_url=backfill_http_rpc_url,
         virtual_token_addr=virtual_token_addr,
         fee_rate_default=fee_rate_default,
         total_supply_default=total_supply_default,
@@ -1071,9 +1075,16 @@ class VirtualsBot:
         self.reload_launch_configs()
         self.ws_reconnect_event = asyncio.Event()
         self.http_rpc = RPCClient(cfg.http_rpc_url, max_retries=cfg.max_rpc_retries)
+        if cfg.backfill_http_rpc_url:
+            self.backfill_http_rpc = RPCClient(
+                cfg.backfill_http_rpc_url, max_retries=cfg.max_rpc_retries
+            )
+        else:
+            self.backfill_http_rpc = self.http_rpc
+        self.backfill_rpc_separate = self.backfill_http_rpc is not self.http_rpc
         self.ws_timeout = aiohttp.ClientTimeout(total=None)
         self.price_service = PriceService(cfg, self.http_rpc)
-        self.queue: asyncio.Queue[Tuple[str, int]] = asyncio.Queue(maxsize=10000)
+        self.queue: asyncio.Queue[Tuple[str, int, bool]] = asyncio.Queue(maxsize=10000)
         self.pending_txs: Set[str] = set()
         self.stop_event = asyncio.Event()
         self.tasks: List[asyncio.Task] = []
@@ -1109,30 +1120,40 @@ class VirtualsBot:
 
     async def __aenter__(self) -> "VirtualsBot":
         await self.http_rpc.__aenter__()
+        if self.backfill_rpc_separate:
+            await self.backfill_http_rpc.__aenter__()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if not self.stop_event.is_set():
             await self.shutdown()
         await self.http_rpc.__aexit__(exc_type, exc, tb)
+        if self.backfill_rpc_separate:
+            await self.backfill_http_rpc.__aexit__(exc_type, exc, tb)
         self.storage.close()
         self.jsonl_file.close()
 
-    async def get_token_decimals(self, token_addr: str) -> int:
+    async def get_token_decimals(
+        self, token_addr: str, rpc: Optional[RPCClient] = None
+    ) -> int:
         token_addr = normalize_address(token_addr)
         cached = self.decimals_cache.get(token_addr)
         if cached is not None:
             return cached
-        out = await self.http_rpc.eth_call(token_addr, DECIMALS_SELECTOR)
+        rpc_client = rpc or self.http_rpc
+        out = await rpc_client.eth_call(token_addr, DECIMALS_SELECTOR)
         dec = int(out, 16)
         self.decimals_cache[token_addr] = dec
         return dec
 
-    async def get_block_timestamp(self, block_number: int) -> int:
+    async def get_block_timestamp(
+        self, block_number: int, rpc: Optional[RPCClient] = None
+    ) -> int:
         cached = self.block_ts_cache.get(block_number)
         if cached is not None:
             return cached
-        block = await self.http_rpc.get_block_by_number(block_number)
+        rpc_client = rpc or self.http_rpc
+        block = await rpc_client.get_block_by_number(block_number)
         if not block:
             return int(time.time())
         ts = int(block["timestamp"], 16)
@@ -1172,6 +1193,7 @@ class VirtualsBot:
         timestamp: int,
         virtual_price_usd: Optional[Decimal],
         is_price_stale: bool,
+        rpc: Optional[RPCClient] = None,
     ) -> List[Dict[str, Any]]:
         logs = receipt.get("logs", [])
         tx_hash = receipt["transactionHash"].lower()
@@ -1235,7 +1257,7 @@ class VirtualsBot:
                 if key not in token_received_first_idx:
                     token_received_first_idx[key] = int(lg["idx"])
 
-        virtual_decimals = await self.get_token_decimals(vaddr)
+        virtual_decimals = await self.get_token_decimals(vaddr, rpc=rpc)
 
         events: List[Dict[str, Any]] = []
         for (buyer, token_addr), raw_amount in token_received_raw.items():
@@ -1267,7 +1289,7 @@ class VirtualsBot:
                 cur_idx = int(nxt["idx"])
                 effective_raw_amount = min(effective_raw_amount, int(nxt["amount_raw"]))
 
-            token_decimals = await self.get_token_decimals(token_addr)
+            token_decimals = await self.get_token_decimals(token_addr, rpc=rpc)
             token_bought = raw_to_decimal(effective_raw_amount, token_decimals)
             if token_bought <= 0:
                 continue
@@ -1325,12 +1347,14 @@ class VirtualsBot:
             )
         return events
 
-    async def enqueue_tx(self, tx_hash: str, block_number: int) -> None:
+    async def enqueue_tx(
+        self, tx_hash: str, block_number: int, use_backfill_rpc: bool = False
+    ) -> None:
         tx_hash = tx_hash.lower()
         if tx_hash in self.pending_txs:
             return
         self.pending_txs.add(tx_hash)
-        await self.queue.put((tx_hash, block_number))
+        await self.queue.put((tx_hash, block_number, use_backfill_rpc))
         self.stats["enqueued_txs"] += 1
 
     async def process_tx(
@@ -1338,16 +1362,18 @@ class VirtualsBot:
         tx_hash: str,
         hint_block: int,
         launch_configs: Optional[List[LaunchConfig]] = None,
+        rpc: Optional[RPCClient] = None,
     ) -> None:
         try:
-            receipt = await self.http_rpc.get_receipt(tx_hash)
+            rpc_client = rpc or self.http_rpc
+            receipt = await rpc_client.get_receipt(tx_hash)
             if not receipt:
                 return
             if receipt.get("status") and int(receipt["status"], 16) == 0:
                 return
 
             block_number = int(receipt["blockNumber"], 16)
-            timestamp = await self.get_block_timestamp(block_number)
+            timestamp = await self.get_block_timestamp(block_number, rpc=rpc_client)
             virtual_price_usd, is_price_stale = await self.price_service.get_price()
 
             all_events: List[Dict[str, Any]] = []
@@ -1362,6 +1388,7 @@ class VirtualsBot:
                     timestamp=timestamp,
                     virtual_price_usd=virtual_price_usd,
                     is_price_stale=is_price_stale,
+                    rpc=rpc_client,
                 )
                 all_events.extend(events)
 
@@ -1385,9 +1412,10 @@ class VirtualsBot:
 
     async def consumer_loop(self) -> None:
         while not self.stop_event.is_set():
-            tx_hash, block_number = await self.queue.get()
+            tx_hash, block_number, use_backfill_rpc = await self.queue.get()
             try:
-                await self.process_tx(tx_hash, block_number)
+                rpc_client = self.backfill_http_rpc if use_backfill_rpc else self.http_rpc
+                await self.process_tx(tx_hash, block_number, rpc=rpc_client)
             finally:
                 self.queue.task_done()
 
@@ -1531,16 +1559,21 @@ class VirtualsBot:
                 await asyncio.sleep(2)
 
     async def fetch_backfill_txhashes(
-        self, from_block: int, to_block: int, launch_configs: List[LaunchConfig]
+        self,
+        from_block: int,
+        to_block: int,
+        launch_configs: List[LaunchConfig],
+        rpc: Optional[RPCClient] = None,
     ) -> Set[str]:
         txs: Set[str] = set()
+        rpc_client = rpc or self.http_rpc
         vaddr = self.cfg.virtual_token_addr
         for launch in launch_configs:
             internal = topic_address(launch.internal_pool_addr)
             fee = topic_address(launch.fee_addr)
             tax = topic_address(launch.tax_addr)
 
-            logs = await self.http_rpc.get_logs(
+            logs = await rpc_client.get_logs(
                 from_block=from_block,
                 to_block=to_block,
                 address=vaddr,
@@ -1548,7 +1581,7 @@ class VirtualsBot:
             )
             txs.update(x["transactionHash"].lower() for x in logs if x.get("transactionHash"))
 
-            logs = await self.http_rpc.get_logs(
+            logs = await rpc_client.get_logs(
                 from_block=from_block,
                 to_block=to_block,
                 address=vaddr,
@@ -1556,14 +1589,14 @@ class VirtualsBot:
             )
             txs.update(x["transactionHash"].lower() for x in logs if x.get("transactionHash"))
 
-            logs = await self.http_rpc.get_logs(
+            logs = await rpc_client.get_logs(
                 from_block=from_block,
                 to_block=to_block,
                 topics=[TRANSFER_TOPIC0, internal],
             )
             txs.update(x["transactionHash"].lower() for x in logs if x.get("transactionHash"))
 
-            logs = await self.http_rpc.get_logs(
+            logs = await rpc_client.get_logs(
                 from_block=from_block,
                 to_block=to_block,
                 topics=[TRANSFER_TOPIC0, None, internal],
@@ -1571,9 +1604,12 @@ class VirtualsBot:
             txs.update(x["transactionHash"].lower() for x in logs if x.get("transactionHash"))
         return txs
 
-    async def find_block_gte_timestamp(self, target_ts: int) -> int:
-        latest = await self.http_rpc.get_latest_block_number()
-        latest_ts = await self.get_block_timestamp(latest)
+    async def find_block_gte_timestamp(
+        self, target_ts: int, rpc: Optional[RPCClient] = None
+    ) -> int:
+        rpc_client = rpc or self.http_rpc
+        latest = await rpc_client.get_latest_block_number()
+        latest_ts = await self.get_block_timestamp(latest, rpc=rpc_client)
         if target_ts >= latest_ts:
             return latest
 
@@ -1581,19 +1617,22 @@ class VirtualsBot:
         high = latest
         while low < high:
             mid = (low + high) // 2
-            mid_ts = await self.get_block_timestamp(mid)
+            mid_ts = await self.get_block_timestamp(mid, rpc=rpc_client)
             if mid_ts < target_ts:
                 low = mid + 1
             else:
                 high = mid
         return low
 
-    async def find_block_lte_timestamp(self, target_ts: int) -> int:
-        latest = await self.http_rpc.get_latest_block_number()
-        first_ts = await self.get_block_timestamp(0)
+    async def find_block_lte_timestamp(
+        self, target_ts: int, rpc: Optional[RPCClient] = None
+    ) -> int:
+        rpc_client = rpc or self.http_rpc
+        latest = await rpc_client.get_latest_block_number()
+        first_ts = await self.get_block_timestamp(0, rpc=rpc_client)
         if target_ts <= first_ts:
             return 0
-        latest_ts = await self.get_block_timestamp(latest)
+        latest_ts = await self.get_block_timestamp(latest, rpc=rpc_client)
         if target_ts >= latest_ts:
             return latest
 
@@ -1601,7 +1640,7 @@ class VirtualsBot:
         high = latest
         while low < high:
             mid = (low + high + 1) // 2
-            mid_ts = await self.get_block_timestamp(mid)
+            mid_ts = await self.get_block_timestamp(mid, rpc=rpc_client)
             if mid_ts <= target_ts:
                 low = mid
             else:
@@ -1620,6 +1659,7 @@ class VirtualsBot:
             try:
                 job["status"] = "running"
                 job["startedAt"] = int(time.time())
+                scan_rpc = self.backfill_http_rpc
 
                 if project:
                     selected = self.storage.get_launch_config_by_name(project)
@@ -1629,8 +1669,8 @@ class VirtualsBot:
                 if not launch_configs:
                     raise ValueError("未找到可扫描的启用项目，请先启用项目")
 
-                from_block = await self.find_block_gte_timestamp(start_ts)
-                to_block = await self.find_block_lte_timestamp(end_ts)
+                from_block = await self.find_block_gte_timestamp(start_ts, rpc=scan_rpc)
+                to_block = await self.find_block_lte_timestamp(end_ts, rpc=scan_rpc)
                 if to_block < from_block:
                     raise ValueError("时间区间无有效区块")
 
@@ -1651,7 +1691,9 @@ class VirtualsBot:
                 current = from_block
                 while current <= to_block and not self.stop_event.is_set():
                     end_block = min(to_block, current + chunk - 1)
-                    txs = await self.fetch_backfill_txhashes(current, end_block, launch_configs)
+                    txs = await self.fetch_backfill_txhashes(
+                        current, end_block, launch_configs, rpc=scan_rpc
+                    )
                     tx_list = sorted(list(txs))
                     job["scannedTx"] = int(job.get("scannedTx", 0)) + len(tx_list)
                     todo_list = tx_list
@@ -1662,7 +1704,12 @@ class VirtualsBot:
                             todo_list = [x for x in tx_list if x not in known]
 
                     for tx_hash in todo_list:
-                        await self.process_tx(tx_hash, end_block, launch_configs=launch_configs)
+                        await self.process_tx(
+                            tx_hash,
+                            end_block,
+                            launch_configs=launch_configs,
+                            rpc=scan_rpc,
+                        )
                         job["processedTx"] = int(job.get("processedTx", 0)) + 1
                     if project and todo_list:
                         self.storage.mark_backfill_scanned_txs(project, todo_list)
@@ -1685,7 +1732,8 @@ class VirtualsBot:
 
     async def backfill_loop(self) -> None:
         checkpoint_raw = self.storage.get_state("last_processed_block")
-        latest = await self.http_rpc.get_latest_block_number()
+        scan_rpc = self.backfill_http_rpc
+        latest = await scan_rpc.get_latest_block_number()
         if checkpoint_raw:
             cursor = int(checkpoint_raw)
         else:
@@ -1694,7 +1742,7 @@ class VirtualsBot:
 
         while not self.stop_event.is_set():
             try:
-                latest = await self.http_rpc.get_latest_block_number()
+                latest = await scan_rpc.get_latest_block_number()
                 target = max(0, latest - self.cfg.confirmations)
                 if cursor >= target:
                     await asyncio.sleep(self.cfg.backfill_interval_sec)
@@ -1705,9 +1753,11 @@ class VirtualsBot:
                     await asyncio.sleep(self.cfg.backfill_interval_sec)
                     continue
                 to_block = min(target, cursor + self.cfg.backfill_chunk_blocks)
-                txs = await self.fetch_backfill_txhashes(cursor + 1, to_block, launch_configs)
+                txs = await self.fetch_backfill_txhashes(
+                    cursor + 1, to_block, launch_configs, rpc=scan_rpc
+                )
                 for tx_hash in txs:
-                    await self.enqueue_tx(tx_hash, to_block)
+                    await self.enqueue_tx(tx_hash, to_block, use_backfill_rpc=True)
                 cursor = to_block
                 self.storage.set_state("last_processed_block", str(cursor))
             except Exception:
@@ -1725,6 +1775,7 @@ class VirtualsBot:
                 "price": decimal_to_str(p, 18) if p is not None else None,
                 "monitoringProjects": [x.name for x in self.get_launch_configs()],
                 "scanJobs": len(self.scan_jobs),
+                "backfillRpcMode": "separate" if self.backfill_rpc_separate else "shared",
             }
         )
 

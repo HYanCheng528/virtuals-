@@ -368,6 +368,7 @@
         <input id="scanEndUtc8" type="datetime-local" class="pill-input" />
         <button id="scanRangeBtn" class="pill">按区间回扫(UTC+8)</button>
         <button id="refreshBtn" class="pill">刷新</button>
+        <button id="fastModeBtn" class="pill">极速模式：关(1s)</button>
         <span id="refreshMessage" class="hint">-</span>
       </div>
     </section>
@@ -512,6 +513,7 @@
     const minuteRangeBtn = document.getElementById("minuteRangeBtn");
     const minuteRangeMessage = document.getElementById("minuteRangeMessage");
     const refreshBtn = document.getElementById("refreshBtn");
+    const fastModeBtn = document.getElementById("fastModeBtn");
     const refreshMessage = document.getElementById("refreshMessage");
     const wsStatus = document.getElementById("wsStatus");
     const priceValue = document.getElementById("priceValue");
@@ -531,12 +533,16 @@
     const deleteConfigBtn = document.getElementById("deleteConfigBtn");
     const fixedInfo = document.getElementById("fixedInfo");
     const lcMessage = document.getElementById("lcMessage");
-    const AUTO_REFRESH_MS = 1000;
+    const FAST_MODE_STORAGE_KEY = "virtuals_fast_mode";
+    const NORMAL_REFRESH_MS = 1000;
+    const FAST_REFRESH_MS = 500;
     let minuteRangeApplied = null;
     let lastChartCssWidth = "";
     let refreshInFlight = false;
     let refreshQueued = false;
     let resizeRefreshTimer = null;
+    let autoRefreshMs = NORMAL_REFRESH_MS;
+    let autoRefreshTimer = null;
 
     const toNum = (v) => {
       const n = Number(v);
@@ -639,6 +645,35 @@
       const r = await fetch(url, { cache: "no-store" });
       if (!r.ok) throw new Error(`${r.status} ${url}`);
       return await r.json();
+    }
+
+    function loadFastMode() {
+      try {
+        return localStorage.getItem(FAST_MODE_STORAGE_KEY) === "1";
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function saveFastMode(enabled) {
+      try {
+        localStorage.setItem(FAST_MODE_STORAGE_KEY, enabled ? "1" : "0");
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    function restartAutoRefreshTimer() {
+      if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+      }
+      autoRefreshTimer = setInterval(() => refreshAllSafe().catch(console.error), autoRefreshMs);
+    }
+
+    function applyFastMode(enabled) {
+      autoRefreshMs = enabled ? FAST_REFRESH_MS : NORMAL_REFRESH_MS;
+      fastModeBtn.textContent = enabled ? "极速模式：开(0.5s)" : "极速模式：关(1s)";
+      restartAutoRefreshTimer();
     }
 
     async function copyText(text) {
@@ -1213,6 +1248,12 @@
         lcMessage
       ).catch(console.error);
     });
+    fastModeBtn.addEventListener("click", () => {
+      const enabled = autoRefreshMs !== FAST_REFRESH_MS;
+      saveFastMode(enabled);
+      applyFastMode(enabled);
+      refreshMessage.textContent = enabled ? "极速模式已开启：0.5秒刷新" : "极速模式已关闭：1秒刷新";
+    });
     window.addEventListener("resize", () => {
       if (resizeRefreshTimer) {
         clearTimeout(resizeRefreshTimer);
@@ -1222,7 +1263,7 @@
       }, 200);
     });
 
-    setInterval(() => refreshAllSafe().catch(console.error), AUTO_REFRESH_MS);
+    applyFastMode(loadFastMode());
     boot();
   </script>
 </body>

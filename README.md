@@ -28,6 +28,7 @@ python -m pip install -r requirements.txt
 2. 填写：
    - `WS_RPC_URL`
    - `HTTP_RPC_URL`
+   - `BACKFILL_HTTP_RPC_URL`（可选，给自动/手动回扫独立 HTTP 节点）
    - `LAUNCH_CONFIGS`（多个项目）
    - `MY_WALLETS`
    - `VIRTUAL_USDC_PAIR_ADDR`（若开启链上价格）
