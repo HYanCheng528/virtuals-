@@ -1,4 +1,4 @@
-﻿# Virtuals 实时监控机器人（v2.0.0）
+﻿# Virtuals 实时监控机器人（v2.1.1）
 
 ## 功能概览
 - 监听 Base 链 `Transfer` 日志，解析打新/内盘买入事件
@@ -64,6 +64,9 @@ python virtuals_bot.py --config .\config.json --role all
 - Dashboard: `http://127.0.0.1:8080/`
 - Health: `http://127.0.0.1:8080/health`
 
+## v2.1.1 文档
+- 更新说明：`RELEASE_v2.1.1_更新说明.md`
+
 ## v2.0.0 文档
 - 三进程运行说明：`RELEASE_v2.0.0_三进程运行说明.md`
 - 更新说明：`RELEASE_v2.0.0_更新说明.md`
@@ -72,3 +75,4 @@ python virtuals_bot.py --config .\config.json --role all
 - 不签名、不发交易，仅做链上读与分析。
 - 若页面未更新，先确认旧进程未占用 8080 端口。
 - `config.json` 默认不提交到 Git（避免泄露私密配置）。
+

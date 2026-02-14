@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Virtuals 实时监控面板 v1.1</title>
+  <title>Virtuals 实时监控面板 v2.1.1</title>
   <style>
     :root {
       --bg-0: #081425;
@@ -437,7 +437,7 @@
     <section class="header">
       <div>
         <div class="title">Virtuals 实时监控面板</div>
-        <div class="subtitle">v1.1 | 链上价格 | 无 Supabase 热路径</div>
+        <div class="subtitle">v2.1.1 | 三进程 | 链上价格 | 无 Supabase 热路径</div>
       </div>
       <div class="controls">
         <select id="projectSelect" class="pill"></select>
@@ -550,8 +550,8 @@
               <th>#</th>
               <th>买家地址</th>
               <th>累计估算花费V</th>
-              <th>累计买入代币</th>
-              <th>FDV_USD</th>
+              <th>累计买入代币(万)</th>
+              <th>FDV_USD(万)</th>
               <th>最近交易时间</th>
             </tr>
           </thead>
@@ -577,8 +577,8 @@
               <th>钱包地址</th>
               <th>代币地址</th>
               <th>累计花费V</th>
-              <th>累计代币数量</th>
-              <th>FDV_USD</th>
+              <th>累计代币数量(万)</th>
+              <th>FDV_USD(万)</th>
               <th>更新时间</th>
             </tr>
           </thead>
@@ -648,6 +648,10 @@
     const lcMessage = document.getElementById("lcMessage");
     const FAST_MODE_STORAGE_KEY = "virtuals_fast_mode";
     const PROJECT_STORAGE_KEY = "virtuals_selected_project";
+    const SCAN_START_STORAGE_KEY = "virtuals_scan_start_utc8";
+    const SCAN_END_STORAGE_KEY = "virtuals_scan_end_utc8";
+    const MINUTE_START_STORAGE_KEY = "virtuals_minute_start_utc8";
+    const MINUTE_END_STORAGE_KEY = "virtuals_minute_end_utc8";
     const NORMAL_REFRESH_MS = 1000;
     const FAST_REFRESH_MS = 500;
     let minuteRangeApplied = null;
@@ -702,6 +706,36 @@
       const n = Number(v);
       if (!Number.isFinite(n)) return String(v);
       return n.toLocaleString("zh-CN", { maximumFractionDigits: digits });
+    }
+
+    function fmtNumFixed(v, digits = 2) {
+      if (v === null || v === undefined) return "-";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v);
+      return n.toLocaleString("zh-CN", {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+    }
+
+    function fmtWanFixed(v, digits = 2) {
+      if (v === null || v === undefined) return "-";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v);
+      const w = n / 10000;
+      return `${w.toLocaleString("zh-CN", {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      })}万`;
+    }
+
+    function exactNumText(v) {
+      if (v === null || v === undefined) return "-";
+      return String(v);
+    }
+
+    function numWithExactTitle(displayText, rawValue) {
+      return `<span title="精确值: ${escAttr(exactNumText(rawValue))}">${displayText}</span>`;
     }
 
     function shortAddr(addr) {
@@ -828,6 +862,31 @@
       }
     }
 
+    function loadSavedDatetimeLocal(key) {
+      try {
+        const raw = (localStorage.getItem(key) || "").trim();
+        if (!raw) return "";
+        if (parseUtc8DatetimeLocalToTs(raw) === null) return "";
+        return raw;
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function saveDatetimeLocal(key, value) {
+      try {
+        const raw = String(value || "").trim();
+        if (!raw) {
+          localStorage.removeItem(key);
+          return;
+        }
+        if (parseUtc8DatetimeLocalToTs(raw) === null) return;
+        localStorage.setItem(key, raw);
+      } catch (e) {
+        // ignore
+      }
+    }
+
     function setDbBatchSizeUi(value) {
       const n = Math.max(1, Math.min(100, Number(value) || 1));
       currentDbBatchSize = n;
@@ -940,22 +999,30 @@
 
     function initScanInputsIfEmpty() {
       const now = Math.floor(Date.now() / 1000);
+      const savedStart = loadSavedDatetimeLocal(SCAN_START_STORAGE_KEY);
+      const savedEnd = loadSavedDatetimeLocal(SCAN_END_STORAGE_KEY);
       if (!scanEndUtc8.value) {
-        scanEndUtc8.value = tsToUtc8DatetimeLocal(now);
+        scanEndUtc8.value = savedEnd || tsToUtc8DatetimeLocal(now);
       }
       if (!scanStartUtc8.value) {
-        scanStartUtc8.value = tsToUtc8DatetimeLocal(now - 3600);
+        scanStartUtc8.value = savedStart || tsToUtc8DatetimeLocal(now - 3600);
       }
+      saveDatetimeLocal(SCAN_START_STORAGE_KEY, scanStartUtc8.value);
+      saveDatetimeLocal(SCAN_END_STORAGE_KEY, scanEndUtc8.value);
     }
 
     function initMinuteInputsIfEmpty() {
       const now = Math.floor(Date.now() / 1000);
+      const savedStart = loadSavedDatetimeLocal(MINUTE_START_STORAGE_KEY);
+      const savedEnd = loadSavedDatetimeLocal(MINUTE_END_STORAGE_KEY);
       if (!minuteEndUtc8.value) {
-        minuteEndUtc8.value = tsToUtc8DatetimeLocal(now);
+        minuteEndUtc8.value = savedEnd || tsToUtc8DatetimeLocal(now);
       }
       if (!minuteStartUtc8.value) {
-        minuteStartUtc8.value = tsToUtc8DatetimeLocal(now - 3600);
+        minuteStartUtc8.value = savedStart || tsToUtc8DatetimeLocal(now - 3600);
       }
+      saveDatetimeLocal(MINUTE_START_STORAGE_KEY, minuteStartUtc8.value);
+      saveDatetimeLocal(MINUTE_END_STORAGE_KEY, minuteEndUtc8.value);
       const startTs = parseUtc8DatetimeLocalToTs(minuteStartUtc8.value);
       const endTs = parseUtc8DatetimeLocalToTs(minuteEndUtc8.value);
       if (startTs && endTs && endTs >= startTs) {
@@ -1301,7 +1368,7 @@
       for (let i = 0; i <= 4; i++) {
         const value = maxY * (1 - i / 4);
         const y = padT + (ch * i) / 4;
-        ctx.fillText(fmtNum(value, 4), 6, y + 4);
+        ctx.fillText(fmtNum(Math.round(value), 0), 6, y + 4);
       }
 
       const slot = cw / Math.max(points.length, 1);
@@ -1330,7 +1397,7 @@
           ctx.fillStyle = "#ffd166";
           ctx.font = "10px Cascadia Mono, monospace";
           const labelY = Math.max(10, y - 4);
-          ctx.fillText(fmtNum(p.y, 4), x + barW / 2, labelY);
+          ctx.fillText(fmtNum(Math.round(p.y), 0), x + barW / 2, labelY);
         }
       }
 
@@ -1354,9 +1421,9 @@
           <td>${r.project || "-"}</td>
           <td>${addrWithCopyHtml(r.wallet)}</td>
           <td>${addrWithCopyHtml(r.token_addr)}</td>
-          <td>${fmtNum(r.sum_spent_v_est, 6)}</td>
-          <td>${fmtNum(r.sum_token_bought, 6)}</td>
-          <td>${fmtNum(r.breakeven_fdv_usd, 4)}</td>
+          <td>${numWithExactTitle(fmtNumFixed(r.sum_spent_v_est, 2), r.sum_spent_v_est)}</td>
+          <td>${numWithExactTitle(fmtWanFixed(r.sum_token_bought, 2), r.sum_token_bought)}</td>
+          <td>${numWithExactTitle(fmtWanFixed(r.breakeven_fdv_usd, 2), r.breakeven_fdv_usd)}</td>
           <td>${fmtTs(r.updated_at)}</td>
         `;
         walletBody.appendChild(tr);
@@ -1375,9 +1442,9 @@
         tr.innerHTML = `
           <td>${idx + 1}</td>
           <td>${addrWithCopyHtml(r.buyer)}</td>
-          <td>${fmtNum(r.sum_spent_v_est, 6)}</td>
-          <td>${fmtNum(r.sum_token_bought, 6)}</td>
-          <td>${fmtNum(r.breakeven_fdv_usd, 4)}</td>
+          <td>${numWithExactTitle(fmtNumFixed(r.sum_spent_v_est, 2), r.sum_spent_v_est)}</td>
+          <td>${numWithExactTitle(fmtWanFixed(r.sum_token_bought, 2), r.sum_token_bought)}</td>
+          <td>${numWithExactTitle(fmtWanFixed(r.breakeven_fdv_usd, 2), r.breakeven_fdv_usd)}</td>
           <td>${fmtTs(r.last_tx_time)}</td>
         `;
         leaderBody.appendChild(tr);
@@ -1604,6 +1671,18 @@
         scanRangeByUtc8,
         refreshMessage
       ).catch(console.error);
+    });
+    scanStartUtc8.addEventListener("change", () => {
+      saveDatetimeLocal(SCAN_START_STORAGE_KEY, scanStartUtc8.value);
+    });
+    scanEndUtc8.addEventListener("change", () => {
+      saveDatetimeLocal(SCAN_END_STORAGE_KEY, scanEndUtc8.value);
+    });
+    minuteStartUtc8.addEventListener("change", () => {
+      saveDatetimeLocal(MINUTE_START_STORAGE_KEY, minuteStartUtc8.value);
+    });
+    minuteEndUtc8.addEventListener("change", () => {
+      saveDatetimeLocal(MINUTE_END_STORAGE_KEY, minuteEndUtc8.value);
     });
     scanCancelBtn.addEventListener("click", () => {
       runButtonAction(
