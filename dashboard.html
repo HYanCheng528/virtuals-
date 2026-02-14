@@ -115,6 +115,12 @@
       cursor: not-allowed;
     }
 
+    .pill.is-active {
+      border-color: rgba(78, 205, 196, 0.9);
+      box-shadow: inset 0 0 0 1px rgba(78, 205, 196, 0.45);
+      color: #dffff8;
+    }
+
     .pill-input {
       border: 1px solid var(--line);
       background: rgba(16, 35, 66, 0.6);
@@ -214,6 +220,13 @@
       flex-wrap: wrap;
       padding-top: 10px;
       padding-bottom: 10px;
+    }
+
+    .batch-tuning-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
     }
 
     .chart-wrap {
@@ -444,6 +457,20 @@
     </section>
 
     <section class="card">
+      <div class="section-title">入库批量调节（DB_BATCH_SIZE）</div>
+      <div class="batch-tuning-row">
+        <button class="pill db-batch-preset" type="button" data-batch-size="1">1</button>
+        <button class="pill db-batch-preset" type="button" data-batch-size="5">5</button>
+        <button class="pill db-batch-preset" type="button" data-batch-size="10">10</button>
+        <button class="pill db-batch-preset" type="button" data-batch-size="20">20</button>
+        <button class="pill db-batch-preset" type="button" data-batch-size="50">50</button>
+        <input id="dbBatchInput" type="number" min="1" max="100" step="1" class="pill-input" style="min-width: 120px;" placeholder="自定义(1~100)" />
+        <button id="applyDbBatchBtn" class="pill">应用批量</button>
+        <span id="dbBatchMessage" class="hint">当前：-</span>
+      </div>
+    </section>
+
+    <section class="card">
       <div class="section-title">项目配置管理（仅可修改 name / 内盘地址）</div>
       <div class="form-grid">
         <div class="field">
@@ -594,6 +621,9 @@
     const refreshMessage = document.getElementById("refreshMessage");
     const refreshPerf = document.getElementById("refreshPerf");
     const delayPerf = document.getElementById("delayPerf");
+    const dbBatchInput = document.getElementById("dbBatchInput");
+    const applyDbBatchBtn = document.getElementById("applyDbBatchBtn");
+    const dbBatchMessage = document.getElementById("dbBatchMessage");
     const wsStatus = document.getElementById("wsStatus");
     const priceValue = document.getElementById("priceValue");
     const queueValue = document.getElementById("queueValue");
@@ -630,6 +660,7 @@
     let currentScanJobId = null;
     let monitoredWallets = [];
     let launchConfigRowsCache = [];
+    let currentDbBatchSize = null;
 
     const toNum = (v) => {
       const n = Number(v);
@@ -797,6 +828,17 @@
       }
     }
 
+    function setDbBatchSizeUi(value) {
+      const n = Math.max(1, Math.min(100, Number(value) || 1));
+      currentDbBatchSize = n;
+      dbBatchInput.value = String(n);
+      document.querySelectorAll(".db-batch-preset").forEach((btn) => {
+        const v = Number(btn.getAttribute("data-batch-size"));
+        btn.classList.toggle("is-active", v === n);
+      });
+      dbBatchMessage.textContent = `当前：${n}`;
+    }
+
     function renderMonitoredWallets(rows) {
       monitoredWallets = (rows || [])
         .map((x) => String(x || "").trim().toLowerCase())
@@ -887,6 +929,9 @@
           `tax_addr=${addrWithCopyHtml(meta.fixedDefaults.tax_addr)} | ` +
           `supply=${fmtNum(meta.fixedDefaults.token_total_supply, 0)} | ` +
           `fee_rate=${fmtNum(meta.fixedDefaults.fee_rate, 6)}`;
+      }
+      if (meta.runtimeTuning && Number.isFinite(Number(meta.runtimeTuning.db_batch_size))) {
+        setDbBatchSizeUi(Number(meta.runtimeTuning.db_batch_size));
       }
       renderMonitoredWallets(meta.wallets || []);
       syncLaunchFormToSelectedProject(projectSelect.value);
@@ -1101,6 +1146,22 @@
         `重算完成：项目=${data.project} 钱包=${shortAddr(data.wallet)} ` +
         `事件=${data.eventCount} 代币=${data.tokenCount} 耗时=${data.durationMs}ms`;
       await refreshAllSafe();
+      return true;
+    }
+
+    async function applyDbBatchSize(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || !Number.isInteger(n)) {
+        throw new Error("DB_BATCH_SIZE 必须是整数");
+      }
+      if (n < 1 || n > 100) {
+        throw new Error("DB_BATCH_SIZE 范围是 1~100");
+      }
+      const data = await requestJsonWithBody("/runtime/db-batch-size", "POST", {
+        db_batch_size: n,
+      });
+      setDbBatchSizeUi(Number(data.dbBatchSize || n));
+      dbBatchMessage.textContent = `已应用：${Number(data.dbBatchSize || n)}`;
       return true;
     }
 
@@ -1416,6 +1477,16 @@
         initScanInputsIfEmpty();
         initMinuteInputsIfEmpty();
         await loadMeta();
+        if (!Number.isFinite(currentDbBatchSize)) {
+          try {
+            const tuning = await jget("/runtime/db-batch-size");
+            if (Number.isFinite(Number(tuning.dbBatchSize))) {
+              setDbBatchSizeUi(Number(tuning.dbBatchSize));
+            }
+          } catch (e) {
+            // ignore older backend
+          }
+        }
         await loadLaunchConfigs();
         await refreshAllSafe();
         const minuteRange = getMinuteRangeTs();
@@ -1584,6 +1655,31 @@
         ev.preventDefault();
         addWalletBtn.click();
       }
+    });
+    applyDbBatchBtn.addEventListener("click", () => {
+      runButtonAction(
+        applyDbBatchBtn,
+        { loading: "应用中...", success: "已应用", failed: "应用失败" },
+        () => applyDbBatchSize(dbBatchInput.value),
+        dbBatchMessage
+      ).catch(console.error);
+    });
+    dbBatchInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        applyDbBatchBtn.click();
+      }
+    });
+    document.querySelectorAll(".db-batch-preset").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const val = btn.getAttribute("data-batch-size");
+        runButtonAction(
+          applyDbBatchBtn,
+          { loading: "应用中...", success: "已应用", failed: "应用失败" },
+          () => applyDbBatchSize(val),
+          dbBatchMessage
+        ).catch(console.error);
+      });
     });
     fastModeBtn.addEventListener("click", () => {
       const enabled = autoRefreshMs !== FAST_REFRESH_MS;

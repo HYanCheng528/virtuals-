@@ -33,6 +33,12 @@ python -m pip install -r requirements.txt
 - `MY_WALLETS`
 - `VIRTUAL_USDC_PAIR_ADDR`（链上价格模式时）
 - `EVENT_BUS_SQLITE_PATH`（三进程事件总线库）
+- `RECEIPT_WORKERS_REALTIME`（可选，实时进程回执并发）
+- `RECEIPT_WORKERS_BACKFILL`（可选，回扫进程回执并发）
+
+说明：
+- 若不配置 `RECEIPT_WORKERS_REALTIME`/`RECEIPT_WORKERS_BACKFILL`，将回退到 `RECEIPT_WORKERS`。
+- `--role all` 单进程模式仍使用 `RECEIPT_WORKERS`。
 
 ## 启动
 ### 三进程（推荐）

@@ -141,6 +141,8 @@ class AppConfig:
     db_batch_size: int
     db_flush_ms: int
     receipt_workers: int
+    receipt_workers_realtime: int
+    receipt_workers_backfill: int
     max_rpc_retries: int
     backfill_chunk_blocks: int
     backfill_interval_sec: int
@@ -205,6 +207,20 @@ def load_config(path: str) -> AppConfig:
     if db_mode == "postgres":
         raise ValueError("current runtime only supports sqlite; set DB_MODE=sqlite")
 
+    receipt_workers = int(raw.get("RECEIPT_WORKERS", 8))
+    receipt_workers_realtime = int(
+        raw.get("RECEIPT_WORKERS_REALTIME", receipt_workers)
+    )
+    receipt_workers_backfill = int(
+        raw.get("RECEIPT_WORKERS_BACKFILL", receipt_workers)
+    )
+    if receipt_workers <= 0:
+        raise ValueError("RECEIPT_WORKERS must be >= 1")
+    if receipt_workers_realtime <= 0:
+        raise ValueError("RECEIPT_WORKERS_REALTIME must be >= 1")
+    if receipt_workers_backfill <= 0:
+        raise ValueError("RECEIPT_WORKERS_BACKFILL must be >= 1")
+
     return AppConfig(
         chain_id=chain_id,
         ws_rpc_url=ws_rpc_url,
@@ -225,7 +241,9 @@ def load_config(path: str) -> AppConfig:
         sqlite_path=str(raw.get("SQLITE_PATH", "./data/virtuals_v11.db")),
         db_batch_size=int(raw.get("DB_BATCH_SIZE", 200)),
         db_flush_ms=int(raw.get("DB_FLUSH_MS", 500)),
-        receipt_workers=int(raw.get("RECEIPT_WORKERS", 8)),
+        receipt_workers=receipt_workers,
+        receipt_workers_realtime=receipt_workers_realtime,
+        receipt_workers_backfill=receipt_workers_backfill,
         max_rpc_retries=int(raw.get("MAX_RPC_RETRIES", 5)),
         backfill_chunk_blocks=int(raw.get("BACKFILL_CHUNK_BLOCKS", 20)),
         backfill_interval_sec=int(raw.get("BACKFILL_INTERVAL_SEC", 8)),
@@ -1659,6 +1677,10 @@ class VirtualsBot:
         self.fixed_fee_rate = template.fee_rate
         self.base_dir = Path(__file__).resolve().parent
         self.storage = Storage(cfg.sqlite_path)
+        runtime_db_batch_size = self.storage.get_state("runtime_db_batch_size")
+        if runtime_db_batch_size:
+            with contextlib.suppress(Exception):
+                cfg.db_batch_size = max(1, int(runtime_db_batch_size))
         self.storage.seed_launch_configs(cfg.launch_configs)
         if not self.storage.get_state("my_wallets_seeded"):
             self.storage.seed_monitored_wallets(cfg.my_wallets)
@@ -1729,6 +1751,15 @@ class VirtualsBot:
 
     def get_my_wallets(self) -> Set[str]:
         return set(self.my_wallets)
+
+    def get_runtime_db_batch_size(self) -> int:
+        return max(1, int(self.cfg.db_batch_size))
+
+    def set_runtime_db_batch_size(self, value: int) -> int:
+        v = max(1, int(value))
+        self.cfg.db_batch_size = v
+        self.storage.set_state("runtime_db_batch_size", str(v))
+        return v
 
     def bump_launch_config_revision(self) -> None:
         rev = str(int(time.time()))
@@ -1841,9 +1872,9 @@ class VirtualsBot:
             await asyncio.sleep(2)
 
     async def bus_writer_loop(self) -> None:
-        batch_size = max(1, self.cfg.db_batch_size)
-        idle_sleep = max(0.05, self.cfg.db_flush_ms / 1000.0)
         while not self.stop_event.is_set():
+            batch_size = max(1, int(self.cfg.db_batch_size))
+            idle_sleep = max(0.05, self.cfg.db_flush_ms / 1000.0)
             rows = self.event_bus.fetch_events(batch_size)
             if not rows:
                 await asyncio.sleep(idle_sleep)
@@ -2818,6 +2849,38 @@ class VirtualsBot:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
+    async def runtime_db_batch_size_get_handler(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "ok": True,
+                "dbBatchSize": self.get_runtime_db_batch_size(),
+            }
+        )
+
+    async def runtime_db_batch_size_set_handler(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json body"}, status=400)
+
+        raw = payload.get("db_batch_size")
+        try:
+            value = int(raw)
+        except Exception:
+            return web.json_response({"error": "db_batch_size must be integer"}, status=400)
+        if value < 1 or value > 100:
+            return web.json_response({"error": "db_batch_size must be between 1 and 100"}, status=400)
+        try:
+            applied = self.set_runtime_db_batch_size(value)
+            return web.json_response(
+                {
+                    "ok": True,
+                    "dbBatchSize": applied,
+                }
+            )
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
     async def launch_config_upsert_handler(self, request: web.Request) -> web.Response:
         try:
             payload = await request.json()
@@ -2899,6 +2962,9 @@ class VirtualsBot:
                     "tax_addr": self.fixed_tax_addr,
                     "token_total_supply": decimal_to_str(self.fixed_token_total_supply, 0),
                     "fee_rate": decimal_to_str(self.fixed_fee_rate, 18),
+                },
+                "runtimeTuning": {
+                    "db_batch_size": self.get_runtime_db_batch_size(),
                 },
             }
         )
@@ -2987,6 +3053,8 @@ class VirtualsBot:
         app.router.add_post("/wallet-configs", self.monitored_wallet_add_handler)
         app.router.add_delete("/wallet-configs/{wallet}", self.monitored_wallet_delete_handler)
         app.router.add_post("/wallet-recalc", self.wallet_recalc_handler)
+        app.router.add_get("/runtime/db-batch-size", self.runtime_db_batch_size_get_handler)
+        app.router.add_post("/runtime/db-batch-size", self.runtime_db_batch_size_set_handler)
         app.router.add_post("/scan-range", self.scan_range_handler)
         app.router.add_get("/scan-jobs/{job_id}", self.scan_job_detail_handler)
         app.router.add_post("/scan-jobs/{job_id}/cancel", self.scan_job_cancel_handler)
@@ -3002,7 +3070,12 @@ class VirtualsBot:
         await self.price_service.start()
 
         if self.is_realtime_role or self.is_backfill_role:
-            for _ in range(max(1, self.cfg.receipt_workers)):
+            worker_count = self.cfg.receipt_workers
+            if self.role == "realtime":
+                worker_count = self.cfg.receipt_workers_realtime
+            elif self.role == "backfill":
+                worker_count = self.cfg.receipt_workers_backfill
+            for _ in range(max(1, worker_count)):
                 self.tasks.append(asyncio.create_task(self.consumer_loop()))
         if self.consume_events_from_bus:
             self.tasks.append(asyncio.create_task(self.bus_writer_loop()))
