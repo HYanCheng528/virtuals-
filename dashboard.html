@@ -60,6 +60,14 @@
       gap: 12px;
       flex-wrap: wrap;
       padding: 10px 2px;
+      position: sticky;
+      top: 8px;
+      z-index: 10;
+      background: rgba(8, 20, 37, 0.72);
+      border: 1px solid rgba(150, 190, 255, 0.2);
+      border-radius: 12px;
+      backdrop-filter: blur(8px);
+      padding: 12px;
     }
 
     .title {
@@ -199,6 +207,15 @@
       text-transform: uppercase;
     }
 
+    .ui-bar {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding-top: 10px;
+      padding-bottom: 10px;
+    }
+
     .chart-wrap {
       background: rgba(8, 18, 35, 0.48);
       border: 1px solid var(--line);
@@ -324,6 +341,22 @@
       background: rgba(255, 255, 255, 0.015);
     }
 
+    tbody tr:hover td {
+      background: rgba(78, 205, 196, 0.08);
+    }
+
+    .delay-good {
+      color: #7ff5cc;
+    }
+
+    .delay-warn {
+      color: #ffd166;
+    }
+
+    .delay-bad {
+      color: #ff8a8a;
+    }
+
     .muted {
       color: var(--muted);
     }
@@ -374,6 +407,11 @@
       </div>
     </section>
 
+    <section class="card ui-bar">
+      <span id="refreshPerf" class="hint">刷新耗时：-</span>
+      <span id="delayPerf" class="hint">录入延迟 P50/P95：-</span>
+    </section>
+
     <section class="card">
       <div class="section-title">项目配置管理（仅可修改 name / 内盘地址）</div>
       <div class="form-grid">
@@ -389,7 +427,7 @@
 
       <div class="form-actions">
         <label class="hint">
-          <input id="lcSwitchOnly" type="checkbox" />
+          <input id="lcSwitchOnly" type="checkbox" checked />
           仅监控当前项目（停用其它项目监听，历史数据保留）
         </label>
         <button id="saveConfigBtn" class="pill">保存/切换项目</button>
@@ -517,6 +555,8 @@
     const refreshBtn = document.getElementById("refreshBtn");
     const fastModeBtn = document.getElementById("fastModeBtn");
     const refreshMessage = document.getElementById("refreshMessage");
+    const refreshPerf = document.getElementById("refreshPerf");
+    const delayPerf = document.getElementById("delayPerf");
     const wsStatus = document.getElementById("wsStatus");
     const priceValue = document.getElementById("priceValue");
     const queueValue = document.getElementById("queueValue");
@@ -536,6 +576,7 @@
     const fixedInfo = document.getElementById("fixedInfo");
     const lcMessage = document.getElementById("lcMessage");
     const FAST_MODE_STORAGE_KEY = "virtuals_fast_mode";
+    const PROJECT_STORAGE_KEY = "virtuals_selected_project";
     const NORMAL_REFRESH_MS = 1000;
     const FAST_REFRESH_MS = 500;
     let minuteRangeApplied = null;
@@ -551,6 +592,36 @@
       const n = Number(v);
       return Number.isFinite(n) ? n : 0;
     };
+
+    function percentile(values, p) {
+      if (!values.length) return null;
+      const sorted = [...values].sort((a, b) => a - b);
+      const i = (sorted.length - 1) * p;
+      const lo = Math.floor(i);
+      const hi = Math.ceil(i);
+      if (lo === hi) return sorted[lo];
+      return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo);
+    }
+
+    function updateDelayPerf(rows) {
+      const values = rows
+        .map((r) => Number(r.delay_sec))
+        .filter((x) => Number.isFinite(x) && x >= 0);
+      if (!values.length) {
+        delayPerf.textContent = "录入延迟 P50/P95：-";
+        return;
+      }
+      const p50 = percentile(values, 0.5);
+      const p95 = percentile(values, 0.95);
+      delayPerf.textContent = `录入延迟 P50/P95：${fmtNum(p50, 2)}s / ${fmtNum(p95, 2)}s`;
+    }
+
+    function delayClass(delaySec) {
+      if (!Number.isFinite(delaySec)) return "";
+      if (delaySec <= 5) return "delay-good";
+      if (delaySec <= 15) return "delay-warn";
+      return "delay-bad";
+    }
 
     function fmtNum(v, digits = 6) {
       if (v === null || v === undefined) return "-";
@@ -666,6 +737,23 @@
       }
     }
 
+    function loadSavedProject() {
+      try {
+        return localStorage.getItem(PROJECT_STORAGE_KEY) || "";
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function saveSelectedProject(name) {
+      try {
+        if (!name) return;
+        localStorage.setItem(PROJECT_STORAGE_KEY, name);
+      } catch (e) {
+        // ignore
+      }
+    }
+
     function restartAutoRefreshTimer() {
       if (autoRefreshTimer) {
         clearInterval(autoRefreshTimer);
@@ -709,7 +797,7 @@
 
     async function loadMeta() {
       const meta = await jget("/meta");
-      const current = projectSelect.value;
+      const current = projectSelect.value || loadSavedProject();
       projectSelect.innerHTML = "";
       for (const p of meta.projects || []) {
         const opt = document.createElement("option");
@@ -722,6 +810,7 @@
       } else if (meta.projects && meta.projects.length) {
         projectSelect.value = meta.projects[0];
       }
+      saveSelectedProject(projectSelect.value);
       if (meta.fixedDefaults) {
         fixedInfo.innerHTML =
           `固定参数：fee_addr=${addrWithCopyHtml(meta.fixedDefaults.fee_addr)} | ` +
@@ -852,6 +941,7 @@
       await loadMeta();
       if (payload.name && [...projectSelect.options].some(o => o.value === payload.name)) {
         projectSelect.value = payload.name;
+        saveSelectedProject(projectSelect.value);
       }
       renderLaunchConfigTable(data.items || []);
       await refreshAllSafe();
@@ -874,6 +964,7 @@
       if (![...projectSelect.options].some(o => o.value === projectSelect.value) && projectSelect.options.length > 0) {
         projectSelect.value = projectSelect.options[0].value;
       }
+      saveSelectedProject(projectSelect.value);
       if (projectSelect.value) {
         const row = (data.items || []).find(x => x.name === projectSelect.value);
         if (row) fillLaunchForm(row);
@@ -1109,12 +1200,13 @@
     function renderTxDelayTable(rows) {
       txDelayBody.innerHTML = "";
       rows.forEach((r) => {
+        const delaySec = Number(r.delay_sec);
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${hashWithCopyHtml(r.tx_hash)}</td>
           <td>${fmtTs(r.block_timestamp)}</td>
           <td>${fmtTs(r.recorded_at)}</td>
-          <td>${fmtNum(r.delay_sec, 0)}</td>
+          <td class="${delayClass(delaySec)}">${fmtNum(delaySec, 0)}</td>
         `;
         txDelayBody.appendChild(tr);
       });
@@ -1123,6 +1215,7 @@
         tr.innerHTML = `<td colspan="4" class="muted">暂无交易录入延迟数据。</td>`;
         txDelayBody.appendChild(tr);
       }
+      updateDelayPerf(rows);
     }
 
     async function refreshAll() {
@@ -1170,10 +1263,15 @@
         return false;
       }
       refreshInFlight = true;
+      const startedAt = performance.now();
+      let ok = false;
       try {
         await refreshAll();
+        ok = true;
         return true;
       } finally {
+        const costMs = Math.round(performance.now() - startedAt);
+        refreshPerf.textContent = ok ? `刷新耗时：${costMs}ms` : `刷新耗时：失败(${costMs}ms)`;
         refreshInFlight = false;
         if (refreshQueued) {
           refreshQueued = false;
@@ -1275,7 +1373,10 @@
         minuteRangeMessage
       ).catch(console.error);
     });
-    projectSelect.addEventListener("change", () => refreshAllSafe().catch(console.error));
+    projectSelect.addEventListener("change", () => {
+      saveSelectedProject(projectSelect.value);
+      refreshAllSafe().catch(console.error);
+    });
     saveConfigBtn.addEventListener("click", () => {
       runButtonAction(
         saveConfigBtn,
