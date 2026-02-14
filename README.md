@@ -1,21 +1,21 @@
-# Virtuals 实时扫描机器人（v1.1）
+﻿# Virtuals 实时监控机器人（v2.0.0）
 
-## 功能
-- Base 链 `Transfer` 实时监听（WebSocket）。
-- 基于 `txHash + receipt.logs` 做项目归因与买入解析。
-- 输出单笔事件（JSONL）与 SQLite 持久化。
-- 实时维护：
-  - `mywallets` 累计成本与回本 FDV
-  - 分钟级 `spentV` 聚合
+## 功能概览
+- 监听 Base 链 `Transfer` 日志，解析打新/内盘买入事件
+- 持久化存储：SQLite + JSONL
+- 指标输出：
+  - 分钟消耗（SpentV）
   - 大户榜
-- 内置接口：
-  - `GET /`（Dashboard UI）
-  - `GET /meta`
-  - `GET /health`
-  - `GET /mywallets`
-  - `GET /mywallets/{addr}`
-  - `GET /minutes?project=...&from=...&to=...`
-  - `GET /leaderboard?project=...&top=N`
+  - 我的钱包持仓
+  - 交易录入延迟
+- 提供 Web UI 与 API
+
+## 运行模式
+支持 4 种角色：
+- `--role writer`：API/UI + 主库写入
+- `--role realtime`：实时 WS 监听与解析
+- `--role backfill`：自动/手动回扫与解析
+- `--role all`：单进程兼容模式
 
 ## 安装
 ```bash
@@ -25,30 +25,44 @@ python -m pip install -r requirements.txt
 
 ## 配置
 1. 复制 `config.example.json` 为 `config.json`
-2. 填写：
-   - `WS_RPC_URL`
-   - `HTTP_RPC_URL`
-   - `BACKFILL_HTTP_RPC_URL`（可选，给自动/手动回扫独立 HTTP 节点）
-   - `LAUNCH_CONFIGS`（多个项目）
-   - `MY_WALLETS`
-   - `VIRTUAL_USDC_PAIR_ADDR`（若开启链上价格）
+2. 按需填写：
+- `WS_RPC_URL`
+- `HTTP_RPC_URL`
+- `BACKFILL_HTTP_RPC_URL`（建议单独给回扫）
+- `LAUNCH_CONFIGS`
+- `MY_WALLETS`
+- `VIRTUAL_USDC_PAIR_ADDR`（链上价格模式时）
+- `EVENT_BUS_SQLITE_PATH`（三进程事件总线库）
 
 ## 启动
-```bash
-cd virtual
-python virtuals_bot.py --config ./config.json
+### 三进程（推荐）
+```powershell
+cd C:\Users\hyc\Desktop\Codex\virtual
+python virtuals_bot.py --config .\config.json --role writer
+python virtuals_bot.py --config .\config.json --role realtime
+python virtuals_bot.py --config .\config.json --role backfill
 ```
 
-## 启动后查看
+### 一键启动/停止
+```powershell
+.\start_3roles.ps1
+.\stop_3roles.ps1
+```
+
+### 单进程兼容
+```powershell
+python virtuals_bot.py --config .\config.json --role all
+```
+
+## 访问地址
 - Dashboard: `http://127.0.0.1:8080/`
-- 健康检查: `http://127.0.0.1:8080/health`
-- v1.5.0 详细使用教程：`RELEASE_v1.5.0_使用说明.md`
+- Health: `http://127.0.0.1:8080/health`
 
-## 输出位置
-- SQLite: `SQLITE_PATH`
-- JSONL: `JSONL_PATH`
+## v2.0.0 文档
+- 三进程运行说明：`RELEASE_v2.0.0_三进程运行说明.md`
+- 更新说明：`RELEASE_v2.0.0_更新说明.md`
 
-## 注意
-- v1.1 禁止 Supabase 配置（检测到会直接报错退出）。
-- 仅链上只读分析，不签名、不发交易、不做 approve。
-- 如果访问 `/` 仍是旧结果，通常是旧进程还占着 `8080`，先停止旧进程再重启。
+## 注意事项
+- 不签名、不发交易，仅做链上读与分析。
+- 若页面未更新，先确认旧进程未占用 8080 端口。
+- `config.json` 默认不提交到 Git（避免泄露私密配置）。

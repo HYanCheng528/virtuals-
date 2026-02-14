@@ -29,10 +29,10 @@ GET_RESERVES_SELECTOR = "0x0902f1ac"
 
 def normalize_address(addr: str) -> str:
     if not isinstance(addr, str):
-        raise ValueError(f"地址必须是字符串，实际类型: {type(addr)}")
+        raise ValueError(f"address must be a string, got: {type(addr)}")
     addr = addr.strip().lower()
     if not addr.startswith("0x") or len(addr) != 42:
-        raise ValueError(f"非法地址格式: {addr}")
+        raise ValueError(f"invalid address format: {addr}")
     int(addr[2:], 16)
     return addr
 
@@ -63,6 +63,50 @@ def decimal_to_str(v: Optional[Decimal], places: int = 18) -> Optional[str]:
 
 def raw_to_decimal(value: int, decimals: int) -> Decimal:
     return Decimal(value) / (Decimal(10) ** decimals)
+
+
+EVENT_DECIMAL_FIELDS = {
+    "token_bought",
+    "fee_v",
+    "tax_v",
+    "spent_v_est",
+    "spent_v_actual",
+    "cost_v",
+    "total_supply",
+    "virtual_price_usd",
+    "breakeven_fdv_v",
+    "breakeven_fdv_usd",
+}
+EVENT_INT_FIELDS = {"block_number", "block_timestamp"}
+EVENT_BOOL_FIELDS = {"is_my_wallet", "anomaly", "is_price_stale"}
+
+
+def serialize_event_for_bus(event: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(event)
+    for key in EVENT_DECIMAL_FIELDS:
+        if key in out and out[key] is not None:
+            out[key] = str(out[key])
+    for key in EVENT_INT_FIELDS:
+        if key in out and out[key] is not None:
+            out[key] = int(out[key])
+    for key in EVENT_BOOL_FIELDS:
+        if key in out and out[key] is not None:
+            out[key] = bool(out[key])
+    return out
+
+
+def deserialize_event_from_bus(payload: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(payload)
+    for key in EVENT_DECIMAL_FIELDS:
+        if key in out and out[key] is not None:
+            out[key] = Decimal(str(out[key]))
+    for key in EVENT_INT_FIELDS:
+        if key in out and out[key] is not None:
+            out[key] = int(out[key])
+    for key in EVENT_BOOL_FIELDS:
+        if key in out and out[key] is not None:
+            out[key] = bool(out[key])
+    return out
 
 
 @dataclass
@@ -102,6 +146,7 @@ class AppConfig:
     backfill_interval_sec: int
     log_level: str
     jsonl_path: str
+    event_bus_sqlite_path: str
     api_host: str
     api_port: int
 
@@ -114,7 +159,7 @@ def load_config(path: str) -> AppConfig:
     found_forbidden = forbidden_keys.intersection(set(raw.keys()))
     if found_forbidden:
         bad = ", ".join(sorted(found_forbidden))
-        raise ValueError(f"v1.1 不允许 Supabase 热路径，检测到配置项: {bad}")
+        raise ValueError(f"v1.1 does not allow Supabase hot path config keys: {bad}")
 
     chain_id = int(raw.get("CHAIN_ID", 8453))
     ws_rpc_url = str(raw["WS_RPC_URL"]).strip()
@@ -126,13 +171,13 @@ def load_config(path: str) -> AppConfig:
     fee_rate_default = Decimal(str(raw.get("FEE_RATE_DEFAULT", "0.01")))
     total_supply_default = Decimal(str(raw.get("TOTAL_SUPPLY_DEFAULT", "1000000000")))
     if fee_rate_default <= 0 or fee_rate_default >= 1:
-        raise ValueError("FEE_RATE_DEFAULT 必须在 (0,1)")
+        raise ValueError("FEE_RATE_DEFAULT must be in (0,1)")
 
     launch_configs: List[LaunchConfig] = []
     for item in raw.get("LAUNCH_CONFIGS", []):
         fee_rate = Decimal(str(item.get("fee_rate", fee_rate_default)))
         if fee_rate <= 0 or fee_rate >= 1:
-            raise ValueError(f"项目 {item.get('name')} fee_rate 非法: {fee_rate}")
+            raise ValueError(f"project {item.get('name')} fee_rate is invalid: {fee_rate}")
         launch_configs.append(
             LaunchConfig(
                 name=str(item["name"]),
@@ -146,7 +191,7 @@ def load_config(path: str) -> AppConfig:
             )
         )
     if not launch_configs:
-        raise ValueError("LAUNCH_CONFIGS 不能为空")
+        raise ValueError("LAUNCH_CONFIGS cannot be empty")
 
     my_wallets = {normalize_address(x) for x in raw.get("MY_WALLETS", [])}
 
@@ -156,9 +201,9 @@ def load_config(path: str) -> AppConfig:
 
     db_mode = str(raw.get("DB_MODE", "sqlite")).lower()
     if db_mode not in {"sqlite", "postgres"}:
-        raise ValueError("DB_MODE 仅允许 sqlite 或 postgres")
+        raise ValueError("DB_MODE only supports sqlite or postgres")
     if db_mode == "postgres":
-        raise ValueError("当前实现先提供 sqlite 运行版；请将 DB_MODE 改为 sqlite")
+        raise ValueError("current runtime only supports sqlite; set DB_MODE=sqlite")
 
     return AppConfig(
         chain_id=chain_id,
@@ -186,6 +231,7 @@ def load_config(path: str) -> AppConfig:
         backfill_interval_sec=int(raw.get("BACKFILL_INTERVAL_SEC", 8)),
         log_level=str(raw.get("LOG_LEVEL", "info")).lower(),
         jsonl_path=str(raw.get("JSONL_PATH", "./data/events.jsonl")),
+        event_bus_sqlite_path=str(raw.get("EVENT_BUS_SQLITE_PATH", "./data/virtuals_bus.db")),
         api_host=str(raw.get("API_HOST", "127.0.0.1")),
         api_port=int(raw.get("API_PORT", 8080)),
     )
@@ -209,7 +255,7 @@ class RPCClient:
 
     async def call(self, method: str, params: List[Any]) -> Any:
         if not self._session:
-            raise RuntimeError("RPC session 未初始化")
+            raise RuntimeError("RPC session is not initialized")
         payload = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}
         self._id += 1
 
@@ -455,6 +501,12 @@ class Storage:
                 updated_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS monitored_wallets (
+                wallet TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS dead_letters (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tx_hash TEXT NOT NULL,
@@ -516,6 +568,21 @@ class Storage:
             )
         self.conn.commit()
 
+    def seed_monitored_wallets(self, wallets: Set[str]) -> None:
+        if not wallets:
+            return
+        now = int(time.time())
+        cur = self.conn.cursor()
+        for wallet in sorted(wallets):
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO monitored_wallets(wallet, created_at, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (normalize_address(wallet), now, now),
+            )
+        self.conn.commit()
+
     def list_launch_configs(self) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             """
@@ -525,6 +592,16 @@ class Storage:
             """
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def list_monitored_wallets(self) -> List[str]:
+        rows = self.conn.execute(
+            """
+            SELECT wallet
+            FROM monitored_wallets
+            ORDER BY updated_at DESC, wallet ASC
+            """
+        ).fetchall()
+        return [normalize_address(str(r["wallet"])) for r in rows if r["wallet"]]
 
     def list_projects(self) -> List[str]:
         rows = self.conn.execute(
@@ -599,9 +676,9 @@ class Storage:
     ) -> None:
         name = name.strip()
         if not name:
-            raise ValueError("name 不能为空")
+            raise ValueError("name cannot be empty")
         if fee_rate <= 0 or fee_rate >= 1:
-            raise ValueError("fee_rate 必须在 (0,1)")
+            raise ValueError("fee_rate must be in (0,1)")
         now = int(time.time())
         self.conn.execute(
             """
@@ -635,7 +712,7 @@ class Storage:
     def delete_launch_config(self, name: str) -> bool:
         name = name.strip()
         if not name:
-            raise ValueError("name 不能为空")
+            raise ValueError("name cannot be empty")
         cur = self.conn.execute(
             """
             DELETE FROM launch_configs
@@ -656,6 +733,32 @@ class Storage:
             (name, int(time.time())),
         )
         self.conn.commit()
+
+    def add_monitored_wallet(self, wallet: str) -> None:
+        now = int(time.time())
+        normalized = normalize_address(wallet)
+        self.conn.execute(
+            """
+            INSERT INTO monitored_wallets(wallet, created_at, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(wallet) DO UPDATE SET
+                updated_at = excluded.updated_at
+            """,
+            (normalized, now, now),
+        )
+        self.conn.commit()
+
+    def delete_monitored_wallet(self, wallet: str) -> bool:
+        normalized = normalize_address(wallet)
+        cur = self.conn.execute(
+            """
+            DELETE FROM monitored_wallets
+            WHERE wallet = ?
+            """,
+            (normalized,),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def _event_tuple(self, event: Dict[str, Any]) -> Tuple[Any, ...]:
         return (
@@ -1059,10 +1162,496 @@ class Storage:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def rebuild_wallet_position_for_project_wallet(self, project: str, wallet: str) -> Dict[str, Any]:
+        project = str(project).strip()
+        wallet = normalize_address(wallet)
+        if not project:
+            raise ValueError("project is required")
+
+        rows = self.conn.execute(
+            """
+            SELECT
+                token_addr,
+                fee_v,
+                spent_v_est,
+                token_bought,
+                total_supply,
+                virtual_price_usd,
+                block_timestamp,
+                created_at
+            FROM events
+            WHERE project = ? AND buyer = ?
+            ORDER BY block_timestamp ASC, created_at ASC
+            """,
+            (project, wallet),
+        ).fetchall()
+
+        token_deltas: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            token_addr = normalize_address(str(r["token_addr"]))
+            d = token_deltas.setdefault(
+                token_addr,
+                {
+                    "sum_fee_v": Decimal(0),
+                    "sum_spent_v_est": Decimal(0),
+                    "sum_token_bought": Decimal(0),
+                    "total_supply": Decimal(0),
+                    "virtual_price_usd": None,
+                },
+            )
+            d["sum_fee_v"] += Decimal(str(r["fee_v"]))
+            d["sum_spent_v_est"] += Decimal(str(r["spent_v_est"]))
+            d["sum_token_bought"] += Decimal(str(r["token_bought"]))
+            d["total_supply"] = Decimal(str(r["total_supply"]))
+            if r["virtual_price_usd"] is not None:
+                d["virtual_price_usd"] = Decimal(str(r["virtual_price_usd"]))
+
+        now = int(time.time())
+        cur = self.conn.cursor()
+        cur.execute("BEGIN")
+        try:
+            cur.execute(
+                """
+                DELETE FROM wallet_positions
+                WHERE project = ? AND wallet = ?
+                """,
+                (project, wallet),
+            )
+
+            inserted = 0
+            for token_addr, d in token_deltas.items():
+                sum_fee_v = d["sum_fee_v"]
+                sum_spent_v_est = d["sum_spent_v_est"]
+                sum_token_bought = d["sum_token_bought"]
+                total_supply = d["total_supply"]
+                virtual_price_usd = d["virtual_price_usd"]
+                avg_cost_v = (sum_spent_v_est / sum_token_bought) if sum_token_bought > 0 else Decimal(0)
+                breakeven_fdv_v = avg_cost_v * total_supply if total_supply > 0 else Decimal(0)
+                breakeven_fdv_usd = (
+                    breakeven_fdv_v * virtual_price_usd if virtual_price_usd is not None else None
+                )
+                cur.execute(
+                    """
+                    INSERT INTO wallet_positions(
+                        project, wallet, token_addr, sum_fee_v, sum_spent_v_est, sum_token_bought,
+                        avg_cost_v, total_supply, breakeven_fdv_v, virtual_price_usd, breakeven_fdv_usd, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project,
+                        wallet,
+                        token_addr,
+                        decimal_to_str(sum_fee_v, 18),
+                        decimal_to_str(sum_spent_v_est, 18),
+                        decimal_to_str(sum_token_bought, 18),
+                        decimal_to_str(avg_cost_v, 18),
+                        decimal_to_str(total_supply, 0),
+                        decimal_to_str(breakeven_fdv_v, 18),
+                        decimal_to_str(virtual_price_usd, 18) if virtual_price_usd is not None else None,
+                        decimal_to_str(breakeven_fdv_usd, 18) if breakeven_fdv_usd is not None else None,
+                        now,
+                    ),
+                )
+                inserted += 1
+
+            self.conn.commit()
+            return {
+                "project": project,
+                "wallet": wallet,
+                "eventCount": len(rows),
+                "tokenCount": inserted,
+            }
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def count_events(self, project: Optional[str] = None) -> int:
+        if project:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(1) AS c
+                FROM events
+                WHERE project = ?
+                """,
+                (project,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(1) AS c
+                FROM events
+                """
+            ).fetchone()
+        return int(row["c"]) if row else 0
+
+
+class EventBusStorage:
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def _init_schema(self) -> None:
+        cur = self.conn.cursor()
+        cur.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+
+            CREATE TABLE IF NOT EXISTS event_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                tx_hash TEXT NOT NULL,
+                block_number INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_queue_id ON event_queue(id);
+
+            CREATE TABLE IF NOT EXISTS role_heartbeats (
+                role TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_jobs (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                project TEXT,
+                start_ts INTEGER NOT NULL,
+                end_ts INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                started_at INTEGER,
+                finished_at INTEGER,
+                error TEXT,
+                from_block INTEGER,
+                to_block INTEGER,
+                total_chunks INTEGER,
+                processed_chunks INTEGER,
+                scanned_tx INTEGER NOT NULL DEFAULT 0,
+                skipped_tx INTEGER NOT NULL DEFAULT 0,
+                processed_tx INTEGER NOT NULL DEFAULT 0,
+                parsed_delta INTEGER NOT NULL DEFAULT 0,
+                inserted_delta INTEGER NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                cancel_requested_at INTEGER,
+                current_block INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_scan_jobs_status_created
+                ON scan_jobs(status, created_at);
+            """
+        )
+        # Recover unfinished manual scan jobs after restart.
+        cur.execute(
+            """
+            UPDATE scan_jobs
+            SET status = 'queued',
+                started_at = NULL,
+                error = 'requeued after restart'
+            WHERE status = 'running'
+            """
+        )
+        self.conn.commit()
+
+    def enqueue_events(self, source: str, events: List[Dict[str, Any]]) -> int:
+        if not events:
+            return 0
+        now = int(time.time())
+        rows = []
+        for event in events:
+            payload = json.dumps(serialize_event_for_bus(event), ensure_ascii=False)
+            rows.append(
+                (
+                    source,
+                    str(event.get("tx_hash", "")).lower(),
+                    int(event.get("block_number", 0)),
+                    payload,
+                    now,
+                )
+            )
+        self.conn.executemany(
+            """
+            INSERT INTO event_queue(source, tx_hash, block_number, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def fetch_events(self, limit_n: int) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT id, payload, block_number
+            FROM event_queue
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (max(1, int(limit_n)),),
+        ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(str(row["payload"]))
+            result.append(
+                {
+                    "id": int(row["id"]),
+                    "block_number": int(row["block_number"]),
+                    "event": deserialize_event_from_bus(payload),
+                }
+            )
+        return result
+
+    def ack_events(self, ids: List[int]) -> None:
+        if not ids:
+            return
+        unique_ids = sorted({int(x) for x in ids})
+        placeholders = ",".join("?" for _ in unique_ids)
+        self.conn.execute(
+            f"DELETE FROM event_queue WHERE id IN ({placeholders})",
+            unique_ids,
+        )
+        self.conn.commit()
+
+    def queue_size(self) -> int:
+        row = self.conn.execute("SELECT COUNT(1) AS c FROM event_queue").fetchone()
+        return int(row["c"]) if row else 0
+
+    def upsert_role_heartbeat(self, role: str, payload: Dict[str, Any]) -> None:
+        now = int(time.time())
+        self.conn.execute(
+            """
+            INSERT INTO role_heartbeats(role, payload, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(role) DO UPDATE SET
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            """,
+            (role, json.dumps(payload, ensure_ascii=False), now),
+        )
+        self.conn.commit()
+
+    def get_role_heartbeat(self, role: str) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            """
+            SELECT role, payload, updated_at
+            FROM role_heartbeats
+            WHERE role = ?
+            """,
+            (role,),
+        ).fetchone()
+        if not row:
+            return None
+        payload: Dict[str, Any]
+        try:
+            payload = json.loads(str(row["payload"]))
+        except Exception:
+            payload = {}
+        return {
+            "role": str(row["role"]),
+            "payload": payload,
+            "updated_at": int(row["updated_at"]),
+        }
+
+    def create_scan_job(self, project: Optional[str], start_ts: int, end_ts: int) -> str:
+        now = int(time.time())
+        job_id = uuid.uuid4().hex[:12]
+        self.conn.execute(
+            """
+            INSERT INTO scan_jobs(
+                id, status, project, start_ts, end_ts, created_at,
+                cancel_requested, scanned_tx, skipped_tx, processed_tx, parsed_delta, inserted_delta
+            ) VALUES (?, 'queued', ?, ?, ?, ?, 0, 0, 0, 0, 0, 0)
+            """,
+            (job_id, project, int(start_ts), int(end_ts), now),
+        )
+        self.conn.commit()
+        return job_id
+
+    def _scan_job_row_to_api(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "status": str(row["status"]),
+            "project": row["project"],
+            "startTs": int(row["start_ts"]),
+            "endTs": int(row["end_ts"]),
+            "createdAt": int(row["created_at"]),
+            "startedAt": int(row["started_at"]) if row["started_at"] is not None else None,
+            "finishedAt": int(row["finished_at"]) if row["finished_at"] is not None else None,
+            "error": row["error"],
+            "fromBlock": int(row["from_block"]) if row["from_block"] is not None else None,
+            "toBlock": int(row["to_block"]) if row["to_block"] is not None else None,
+            "totalChunks": int(row["total_chunks"]) if row["total_chunks"] is not None else 0,
+            "processedChunks": int(row["processed_chunks"]) if row["processed_chunks"] is not None else 0,
+            "scannedTx": int(row["scanned_tx"]),
+            "skippedTx": int(row["skipped_tx"]),
+            "processedTx": int(row["processed_tx"]),
+            "parsedDelta": int(row["parsed_delta"]),
+            "insertedDelta": int(row["inserted_delta"]),
+            "cancelRequested": bool(row["cancel_requested"]),
+            "cancelRequestedAt": int(row["cancel_requested_at"]) if row["cancel_requested_at"] is not None else None,
+            "currentBlock": int(row["current_block"]) if row["current_block"] is not None else None,
+        }
+
+    def get_scan_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM scan_jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return self._scan_job_row_to_api(row)
+
+    def request_scan_job_cancel(self, job_id: str) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM scan_jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if not row:
+            return None
+        status = str(row["status"])
+        now = int(time.time())
+        if status in {"done", "failed", "canceled"}:
+            return self._scan_job_row_to_api(row)
+
+        if status == "queued":
+            self.conn.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'canceled',
+                    cancel_requested = 1,
+                    cancel_requested_at = ?,
+                    finished_at = ?,
+                    error = 'canceled by user'
+                WHERE id = ?
+                """,
+                (now, now, job_id),
+            )
+        else:
+            self.conn.execute(
+                """
+                UPDATE scan_jobs
+                SET cancel_requested = 1,
+                    cancel_requested_at = ?
+                WHERE id = ?
+                """,
+                (now, job_id),
+            )
+        self.conn.commit()
+        return self.get_scan_job(job_id)
+
+    def claim_next_scan_job(self) -> Optional[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        row = cur.execute(
+            """
+            SELECT id
+            FROM scan_jobs
+            WHERE status = 'queued'
+            ORDER BY created_at ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            self.conn.rollback()
+            return None
+        job_id = str(row["id"])
+        now = int(time.time())
+        cur.execute(
+            """
+            UPDATE scan_jobs
+            SET status = 'running',
+                started_at = ?,
+                error = NULL
+            WHERE id = ? AND status = 'queued'
+            """,
+            (now, job_id),
+        )
+        if cur.rowcount != 1:
+            self.conn.rollback()
+            return None
+        row2 = cur.execute(
+            """
+            SELECT *
+            FROM scan_jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        self.conn.commit()
+        if not row2:
+            return None
+        return self._scan_job_row_to_api(row2)
+
+    def update_scan_job(self, job_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = []
+        vals: List[Any] = []
+        for key, value in fields.items():
+            cols.append(f"{key} = ?")
+            vals.append(value)
+        vals.append(job_id)
+        sql = f"UPDATE scan_jobs SET {', '.join(cols)} WHERE id = ?"
+        self.conn.execute(sql, vals)
+        self.conn.commit()
+
+    def is_scan_job_cancel_requested(self, job_id: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT cancel_requested
+            FROM scan_jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if not row:
+            return False
+        return bool(row["cancel_requested"])
+
+    def count_scan_jobs(self, only_active: bool = False) -> int:
+        if only_active:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(1) AS c
+                FROM scan_jobs
+                WHERE status IN ('queued', 'running')
+                """
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(1) AS c
+                FROM scan_jobs
+                """
+            ).fetchone()
+        return int(row["c"]) if row else 0
+
 
 class VirtualsBot:
-    def __init__(self, cfg: AppConfig):
+    def __init__(self, cfg: AppConfig, role: str = "all"):
+        if role not in {"all", "writer", "realtime", "backfill"}:
+            raise ValueError(f"invalid role: {role}")
         self.cfg = cfg
+        self.role = role
+        self.is_writer_role = role in {"all", "writer"}
+        self.is_realtime_role = role in {"all", "realtime"}
+        self.is_backfill_role = role in {"all", "backfill"}
+        self.emit_events_to_bus = role in {"realtime", "backfill"}
+        self.consume_events_from_bus = role == "writer"
+        self.enable_api = role in {"all", "writer"}
         template = cfg.launch_configs[0]
         self.fixed_fee_addr = template.fee_addr
         self.fixed_tax_addr = template.tax_addr
@@ -1071,8 +1660,18 @@ class VirtualsBot:
         self.base_dir = Path(__file__).resolve().parent
         self.storage = Storage(cfg.sqlite_path)
         self.storage.seed_launch_configs(cfg.launch_configs)
+        if not self.storage.get_state("my_wallets_seeded"):
+            self.storage.seed_monitored_wallets(cfg.my_wallets)
+            self.storage.set_state("my_wallets_seeded", "1")
+        self.event_bus = EventBusStorage(cfg.event_bus_sqlite_path)
         self.launch_configs: List[LaunchConfig] = []
+        self.my_wallets: Set[str] = set()
         self.reload_launch_configs()
+        self.reload_my_wallets()
+        if not self.storage.get_state("launch_configs_rev"):
+            self.storage.set_state("launch_configs_rev", str(int(time.time())))
+        if not self.storage.get_state("my_wallets_rev"):
+            self.storage.set_state("my_wallets_rev", str(int(time.time())))
         self.ws_reconnect_event = asyncio.Event()
         self.http_rpc = RPCClient(cfg.http_rpc_url, max_retries=cfg.max_rpc_retries)
         if cfg.backfill_http_rpc_url:
@@ -1089,6 +1688,7 @@ class VirtualsBot:
         self.stop_event = asyncio.Event()
         self.tasks: List[asyncio.Task] = []
         self.flush_lock = asyncio.Lock()
+        self.wallet_recalc_lock = asyncio.Lock()
         self.pending_events: List[Dict[str, Any]] = []
         self.pending_max_block = 0
         self.decimals_cache: Dict[str, int] = {}
@@ -1104,12 +1704,18 @@ class VirtualsBot:
             "rpc_errors": 0,
             "dead_letters": 0,
             "last_ws_block": 0,
+            "last_backfill_block": 0,
             "last_flush_at": 0,
             "started_at": int(time.time()),
+            "role": role,
         }
+        self.last_launch_cfg_rev = self.storage.get_state("launch_configs_rev") or ""
+        self.last_my_wallets_rev = self.storage.get_state("my_wallets_rev") or ""
 
-        Path(cfg.jsonl_path).parent.mkdir(parents=True, exist_ok=True)
-        self.jsonl_file = open(cfg.jsonl_path, "a", encoding="utf-8")
+        self.jsonl_file = None
+        if self.is_writer_role:
+            Path(cfg.jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+            self.jsonl_file = open(cfg.jsonl_path, "a", encoding="utf-8")
 
     def reload_launch_configs(self) -> None:
         launch_configs = self.storage.get_enabled_launch_configs()
@@ -1117,6 +1723,148 @@ class VirtualsBot:
 
     def get_launch_configs(self) -> List[LaunchConfig]:
         return list(self.launch_configs)
+
+    def reload_my_wallets(self) -> None:
+        self.my_wallets = set(self.storage.list_monitored_wallets())
+
+    def get_my_wallets(self) -> Set[str]:
+        return set(self.my_wallets)
+
+    def bump_launch_config_revision(self) -> None:
+        rev = str(int(time.time()))
+        self.storage.set_state("launch_configs_rev", rev)
+        self.last_launch_cfg_rev = rev
+
+    def bump_my_wallet_revision(self) -> None:
+        rev = str(int(time.time()))
+        self.storage.set_state("my_wallets_rev", rev)
+        self.last_my_wallets_rev = rev
+
+    async def launch_config_watch_loop(self) -> None:
+        while not self.stop_event.is_set():
+            await asyncio.sleep(2)
+            latest = self.storage.get_state("launch_configs_rev") or ""
+            if latest != self.last_launch_cfg_rev:
+                self.last_launch_cfg_rev = latest
+                self.reload_launch_configs()
+                if self.is_realtime_role:
+                    self.ws_reconnect_event.set()
+
+    async def my_wallet_watch_loop(self) -> None:
+        while not self.stop_event.is_set():
+            await asyncio.sleep(2)
+            latest = self.storage.get_state("my_wallets_rev") or ""
+            if latest != self.last_my_wallets_rev:
+                self.last_my_wallets_rev = latest
+                self.reload_my_wallets()
+
+    def write_inserted_events_jsonl(self, inserted: List[Dict[str, Any]]) -> None:
+        if not inserted or not self.jsonl_file:
+            return
+        for e in inserted:
+            self.jsonl_file.write(
+                json.dumps(
+                    {
+                        "project": e["project"],
+                        "txHash": e["tx_hash"],
+                        "blockNumber": e["block_number"],
+                        "timestamp": e["block_timestamp"],
+                        "internalPool": e["internal_pool"],
+                        "feeAddr": e["fee_addr"],
+                        "taxAddr": e["tax_addr"],
+                        "buyer": e["buyer"],
+                        "tokenAddr": e["token_addr"],
+                        "tokenBought": decimal_to_str(e["token_bought"], 18),
+                        "feeV": decimal_to_str(e["fee_v"], 18),
+                        "taxV": decimal_to_str(e["tax_v"], 18),
+                        "spentV_est": decimal_to_str(e["spent_v_est"], 18),
+                        "spentV_actual": decimal_to_str(e["spent_v_actual"], 18),
+                        "costV": decimal_to_str(e["cost_v"], 18),
+                        "totalSupply": decimal_to_str(e["total_supply"], 0),
+                        "breakevenFDV_V": decimal_to_str(e["breakeven_fdv_v"], 18),
+                        "virtualPriceUSD": decimal_to_str(e["virtual_price_usd"], 18)
+                        if e.get("virtual_price_usd") is not None
+                        else None,
+                        "breakevenFDV_USD": decimal_to_str(e["breakeven_fdv_usd"], 18)
+                        if e.get("breakeven_fdv_usd") is not None
+                        else None,
+                        "isMyWallet": e["is_my_wallet"],
+                        "anomaly": e["anomaly"],
+                        "isPriceStale": e["is_price_stale"],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        self.jsonl_file.flush()
+
+    def persist_events_batch(self, events: List[Dict[str, Any]], max_block: int) -> int:
+        inserted = self.storage.flush_events(events, max_block)
+        self.stats["inserted_events"] += len(inserted)
+        self.stats["last_flush_at"] = int(time.time())
+        self.write_inserted_events_jsonl(inserted)
+        return len(inserted)
+
+    async def emit_parsed_events(self, events: List[Dict[str, Any]], block_number: int) -> None:
+        if not events:
+            return
+        if self.emit_events_to_bus:
+            self.event_bus.enqueue_events(self.role, events)
+        else:
+            async with self.flush_lock:
+                self.pending_events.extend(events)
+                self.pending_max_block = max(self.pending_max_block, block_number)
+        self.stats["parsed_events"] += len(events)
+
+    def build_heartbeat_payload(self) -> Dict[str, Any]:
+        return {
+            "role": self.role,
+            "ws_connected": bool(self.stats.get("ws_connected", False)),
+            "enqueued_txs": int(self.stats.get("enqueued_txs", 0)),
+            "processed_txs": int(self.stats.get("processed_txs", 0)),
+            "parsed_events": int(self.stats.get("parsed_events", 0)),
+            "rpc_errors": int(self.stats.get("rpc_errors", 0)),
+            "dead_letters": int(self.stats.get("dead_letters", 0)),
+            "last_ws_block": int(self.stats.get("last_ws_block", 0)),
+            "last_backfill_block": int(self.stats.get("last_backfill_block", 0)),
+            "queue_size": int(self.queue.qsize()),
+            "pending_txs": int(len(self.pending_txs)),
+            "updated_at": int(time.time()),
+        }
+
+    async def role_heartbeat_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.event_bus.upsert_role_heartbeat(self.role, self.build_heartbeat_payload())
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+    async def bus_writer_loop(self) -> None:
+        batch_size = max(1, self.cfg.db_batch_size)
+        idle_sleep = max(0.05, self.cfg.db_flush_ms / 1000.0)
+        while not self.stop_event.is_set():
+            rows = self.event_bus.fetch_events(batch_size)
+            if not rows:
+                await asyncio.sleep(idle_sleep)
+                continue
+            try:
+                events = [x["event"] for x in rows]
+                max_block = max((int(x.get("block_number", 0)) for x in events), default=0)
+                self.stats["parsed_events"] += len(events)
+                self.persist_events_batch(events, max_block)
+                self.event_bus.ack_events([int(x["id"]) for x in rows])
+            except Exception:
+                self.stats["rpc_errors"] += 1
+                await asyncio.sleep(0.5)
+
+    async def scan_job_dispatch_loop(self) -> None:
+        while not self.stop_event.is_set():
+            job = self.event_bus.claim_next_scan_job()
+            if not job:
+                await asyncio.sleep(1)
+                continue
+            await self.run_scan_range_job_bus(job)
 
     async def __aenter__(self) -> "VirtualsBot":
         await self.http_rpc.__aenter__()
@@ -1131,7 +1879,9 @@ class VirtualsBot:
         if self.backfill_rpc_separate:
             await self.backfill_http_rpc.__aexit__(exc_type, exc, tb)
         self.storage.close()
-        self.jsonl_file.close()
+        self.event_bus.close()
+        if self.jsonl_file:
+            self.jsonl_file.close()
 
     async def get_token_decimals(
         self, token_addr: str, rpc: Optional[RPCClient] = None
@@ -1340,7 +2090,7 @@ class VirtualsBot:
                     "virtual_price_usd": virtual_price_usd,
                     "breakeven_fdv_v": breakeven_fdv_v,
                     "breakeven_fdv_usd": breakeven_fdv_usd,
-                    "is_my_wallet": effective_buyer in self.cfg.my_wallets,
+                    "is_my_wallet": effective_buyer in self.my_wallets,
                     "anomaly": anomaly,
                     "is_price_stale": is_price_stale,
                 }
@@ -1393,10 +2143,7 @@ class VirtualsBot:
                 all_events.extend(events)
 
             if all_events:
-                async with self.flush_lock:
-                    self.pending_events.extend(all_events)
-                    self.pending_max_block = max(self.pending_max_block, block_number)
-                self.stats["parsed_events"] += len(all_events)
+                await self.emit_parsed_events(all_events, block_number)
 
             self.stats["processed_txs"] += 1
         except Exception as e:
@@ -1436,47 +2183,7 @@ class VirtualsBot:
             self.pending_events = []
             self.pending_max_block = 0
 
-        inserted = self.storage.flush_events(events, max_block)
-        self.stats["inserted_events"] += len(inserted)
-        self.stats["last_flush_at"] = int(time.time())
-
-        for e in inserted:
-            self.jsonl_file.write(
-                json.dumps(
-                    {
-                        "project": e["project"],
-                        "txHash": e["tx_hash"],
-                        "blockNumber": e["block_number"],
-                        "timestamp": e["block_timestamp"],
-                        "internalPool": e["internal_pool"],
-                        "feeAddr": e["fee_addr"],
-                        "taxAddr": e["tax_addr"],
-                        "buyer": e["buyer"],
-                        "tokenAddr": e["token_addr"],
-                        "tokenBought": decimal_to_str(e["token_bought"], 18),
-                        "feeV": decimal_to_str(e["fee_v"], 18),
-                        "taxV": decimal_to_str(e["tax_v"], 18),
-                        "spentV_est": decimal_to_str(e["spent_v_est"], 18),
-                        "spentV_actual": decimal_to_str(e["spent_v_actual"], 18),
-                        "costV": decimal_to_str(e["cost_v"], 18),
-                        "totalSupply": decimal_to_str(e["total_supply"], 0),
-                        "breakevenFDV_V": decimal_to_str(e["breakeven_fdv_v"], 18),
-                        "virtualPriceUSD": decimal_to_str(e["virtual_price_usd"], 18)
-                        if e.get("virtual_price_usd") is not None
-                        else None,
-                        "breakevenFDV_USD": decimal_to_str(e["breakeven_fdv_usd"], 18)
-                        if e.get("breakeven_fdv_usd") is not None
-                        else None,
-                        "isMyWallet": e["is_my_wallet"],
-                        "anomaly": e["anomaly"],
-                        "isPriceStale": e["is_price_stale"],
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-        if inserted:
-            self.jsonl_file.flush()
+        self.persist_events_batch(events, max_block)
 
     async def ws_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -1673,12 +2380,12 @@ class VirtualsBot:
                 else:
                     launch_configs = self.get_launch_configs()
                 if not launch_configs:
-                    raise ValueError("未找到可扫描的启用项目，请先启用项目")
+                    raise ValueError("no enabled launch configs to scan; please enable a project first")
 
                 from_block = await self.find_block_gte_timestamp(start_ts, rpc=scan_rpc)
                 to_block = await self.find_block_lte_timestamp(end_ts, rpc=scan_rpc)
                 if to_block < from_block:
-                    raise ValueError("时间区间无有效区块")
+                    raise ValueError("invalid block range for time range")
 
                 chunk = max(1, self.cfg.backfill_chunk_blocks)
                 total_blocks = to_block - from_block + 1
@@ -1692,7 +2399,7 @@ class VirtualsBot:
                 job["skippedTx"] = 0
                 job["processedTx"] = 0
                 parsed_before = int(self.stats.get("parsed_events", 0))
-                inserted_before = int(self.stats.get("inserted_events", 0))
+                inserted_before = self.storage.count_events(project=project)
                 canceled = False
 
                 current = from_block
@@ -1735,7 +2442,7 @@ class VirtualsBot:
                     current = end_block + 1
 
                 parsed_after = int(self.stats.get("parsed_events", 0))
-                inserted_after = int(self.stats.get("inserted_events", 0))
+                inserted_after = self.storage.count_events(project=project)
                 job["parsedDelta"] = max(0, parsed_after - parsed_before)
                 job["insertedDelta"] = max(0, inserted_after - inserted_before)
                 if canceled:
@@ -1750,6 +2457,122 @@ class VirtualsBot:
                 job["error"] = str(e)
                 job["finishedAt"] = int(time.time())
 
+    async def run_scan_range_job_bus(self, job: Dict[str, Any]) -> None:
+        job_id = str(job["id"])
+        project = str(job["project"]).strip() if job.get("project") else None
+        start_ts = int(job.get("startTs", 0))
+        end_ts = int(job.get("endTs", 0))
+
+        async with self.scan_lock:
+            try:
+                scan_rpc = self.backfill_http_rpc
+                if project:
+                    selected = self.storage.get_launch_config_by_name(project)
+                    launch_configs = [selected] if selected else []
+                else:
+                    launch_configs = self.get_launch_configs()
+                if not launch_configs:
+                    raise ValueError("no enabled launch configs to scan")
+
+                from_block = await self.find_block_gte_timestamp(start_ts, rpc=scan_rpc)
+                to_block = await self.find_block_lte_timestamp(end_ts, rpc=scan_rpc)
+                if to_block < from_block:
+                    raise ValueError("invalid block range for time range")
+
+                chunk = max(1, self.cfg.backfill_chunk_blocks)
+                total_blocks = to_block - from_block + 1
+                total_chunks = (total_blocks + chunk - 1) // chunk
+                self.event_bus.update_scan_job(
+                    job_id,
+                    from_block=from_block,
+                    to_block=to_block,
+                    total_chunks=total_chunks,
+                    processed_chunks=0,
+                    scanned_tx=0,
+                    skipped_tx=0,
+                    processed_tx=0,
+                    parsed_delta=0,
+                    inserted_delta=0,
+                    current_block=from_block,
+                )
+
+                parsed_before = int(self.stats.get("parsed_events", 0))
+                inserted_before = self.storage.count_events(project=project)
+                canceled = False
+                processed_chunks = 0
+                scanned_tx = 0
+                skipped_tx = 0
+                processed_tx = 0
+
+                current = from_block
+                while current <= to_block and not self.stop_event.is_set():
+                    if self.event_bus.is_scan_job_cancel_requested(job_id):
+                        canceled = True
+                        break
+                    end_block = min(to_block, current + chunk - 1)
+                    txs = await self.fetch_backfill_txhashes(
+                        current, end_block, launch_configs, rpc=scan_rpc
+                    )
+                    tx_list = sorted(list(txs))
+                    scanned_tx += len(tx_list)
+                    todo_list = tx_list
+                    if project and tx_list:
+                        known = self.storage.get_known_backfill_txs(project, tx_list)
+                        if known:
+                            skipped_tx += len(known)
+                            todo_list = [x for x in tx_list if x not in known]
+
+                    for tx_hash in todo_list:
+                        if self.event_bus.is_scan_job_cancel_requested(job_id):
+                            canceled = True
+                            break
+                        await self.process_tx(
+                            tx_hash,
+                            end_block,
+                            launch_configs=launch_configs,
+                            rpc=scan_rpc,
+                        )
+                        processed_tx += 1
+                    if canceled:
+                        break
+                    if project and todo_list:
+                        self.storage.mark_backfill_scanned_txs(project, todo_list)
+
+                    processed_chunks += 1
+                    current = end_block + 1
+                    self.event_bus.update_scan_job(
+                        job_id,
+                        processed_chunks=processed_chunks,
+                        current_block=end_block,
+                        scanned_tx=scanned_tx,
+                        skipped_tx=skipped_tx,
+                        processed_tx=processed_tx,
+                    )
+
+                parsed_after = int(self.stats.get("parsed_events", 0))
+                inserted_after = self.storage.count_events(project=project)
+                done_status = "canceled" if canceled else "done"
+                done_error = "canceled by user" if canceled else None
+                self.event_bus.update_scan_job(
+                    job_id,
+                    status=done_status,
+                    error=done_error,
+                    finished_at=int(time.time()),
+                    processed_chunks=processed_chunks,
+                    scanned_tx=scanned_tx,
+                    skipped_tx=skipped_tx,
+                    processed_tx=processed_tx,
+                    parsed_delta=max(0, parsed_after - parsed_before),
+                    inserted_delta=max(0, inserted_after - inserted_before),
+                )
+            except Exception as e:
+                self.event_bus.update_scan_job(
+                    job_id,
+                    status="failed",
+                    error=str(e),
+                    finished_at=int(time.time()),
+                )
+
     async def backfill_loop(self) -> None:
         checkpoint_raw = self.storage.get_state("last_processed_block")
         scan_rpc = self.backfill_http_rpc
@@ -1762,6 +2585,9 @@ class VirtualsBot:
 
         while not self.stop_event.is_set():
             try:
+                if self.scan_lock.locked():
+                    await asyncio.sleep(1)
+                    continue
                 latest = await scan_rpc.get_latest_block_number()
                 target = max(0, latest - self.cfg.confirmations)
                 if cursor >= target:
@@ -1780,22 +2606,50 @@ class VirtualsBot:
                     await self.enqueue_tx(tx_hash, to_block, use_backfill_rpc=True)
                 cursor = to_block
                 self.storage.set_state("last_processed_block", str(cursor))
+                self.stats["last_backfill_block"] = cursor
             except Exception:
                 await asyncio.sleep(2)
 
     async def health_handler(self, request: web.Request) -> web.Response:
         p, _ = await self.price_service.get_price()
+        stats = dict(self.stats)
+        queue_size = int(self.queue.qsize())
+        pending_tx = int(len(self.pending_txs))
+        scan_jobs = int(len(self.scan_jobs))
+
+        if self.role == "writer":
+            now = int(time.time())
+            queue_size = self.event_bus.queue_size()
+            scan_jobs = self.event_bus.count_scan_jobs(only_active=True)
+
+            rt_hb = self.event_bus.get_role_heartbeat("realtime")
+            if rt_hb and (now - int(rt_hb["updated_at"]) <= 20):
+                rp = rt_hb.get("payload", {})
+                stats["ws_connected"] = bool(rp.get("ws_connected", False))
+                stats["last_ws_block"] = int(rp.get("last_ws_block", 0))
+                stats["enqueued_txs"] = int(rp.get("enqueued_txs", 0))
+                stats["processed_txs"] = int(rp.get("processed_txs", 0))
+                pending_tx = int(rp.get("pending_txs", 0))
+            else:
+                stats["ws_connected"] = False
+
+            bf_hb = self.event_bus.get_role_heartbeat("backfill")
+            if bf_hb and (now - int(bf_hb["updated_at"]) <= 20):
+                bp = bf_hb.get("payload", {})
+                stats["last_backfill_block"] = int(bp.get("last_backfill_block", 0))
+
         return web.json_response(
             {
                 "ok": True,
-                "queueSize": self.queue.qsize(),
-                "pendingTx": len(self.pending_txs),
-                "stats": self.stats,
+                "queueSize": queue_size,
+                "pendingTx": pending_tx,
+                "stats": stats,
                 "lastProcessedBlock": self.storage.get_state("last_processed_block"),
                 "price": decimal_to_str(p, 18) if p is not None else None,
                 "monitoringProjects": [x.name for x in self.get_launch_configs()],
-                "scanJobs": len(self.scan_jobs),
+                "scanJobs": scan_jobs,
                 "backfillRpcMode": "separate" if self.backfill_rpc_separate else "shared",
+                "role": self.role,
             }
         )
 
@@ -1818,6 +2672,10 @@ class VirtualsBot:
         if project is not None:
             project = str(project).strip() or None
 
+        if self.role == "writer":
+            job_id = self.event_bus.create_scan_job(project, start_ts, end_ts)
+            return web.json_response({"ok": True, "jobId": job_id})
+
         job_id = uuid.uuid4().hex[:12]
         self.scan_jobs[job_id] = {
             "id": job_id,
@@ -1833,6 +2691,12 @@ class VirtualsBot:
 
     async def scan_job_detail_handler(self, request: web.Request) -> web.Response:
         job_id = str(request.match_info.get("job_id", "")).strip()
+        if self.role == "writer":
+            job = self.event_bus.get_scan_job(job_id)
+            if not job:
+                return web.json_response({"error": "job not found"}, status=404)
+            return web.json_response(job)
+
         job = self.scan_jobs.get(job_id)
         if not job:
             return web.json_response({"error": "job not found"}, status=404)
@@ -1840,6 +2704,13 @@ class VirtualsBot:
 
     async def scan_job_cancel_handler(self, request: web.Request) -> web.Response:
         job_id = str(request.match_info.get("job_id", "")).strip()
+        if self.role == "writer":
+            job = self.event_bus.request_scan_job_cancel(job_id)
+            if not job:
+                return web.json_response({"error": "job not found"}, status=404)
+            final = str(job.get("status") or "") in {"done", "failed", "canceled"}
+            return web.json_response({"ok": True, "alreadyFinal": final, "job": job})
+
         job = self.scan_jobs.get(job_id)
         if not job:
             return web.json_response({"error": "job not found"}, status=404)
@@ -1861,6 +2732,92 @@ class VirtualsBot:
         rows = self.storage.list_launch_configs()
         return web.json_response({"count": len(rows), "items": rows})
 
+    async def monitored_wallets_handler(self, request: web.Request) -> web.Response:
+        rows = self.storage.list_monitored_wallets()
+        return web.json_response({"count": len(rows), "items": rows})
+
+    async def monitored_wallet_add_handler(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json body"}, status=400)
+
+        try:
+            wallet = normalize_address(str(payload.get("wallet", "")).strip())
+            self.storage.add_monitored_wallet(wallet)
+            self.reload_my_wallets()
+            self.bump_my_wallet_revision()
+            return web.json_response(
+                {
+                    "ok": True,
+                    "wallets": sorted(self.get_my_wallets()),
+                    "items": self.storage.list_monitored_wallets(),
+                    "count": len(self.get_my_wallets()),
+                }
+            )
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def monitored_wallet_delete_handler(self, request: web.Request) -> web.Response:
+        wallet_raw = str(request.match_info.get("wallet", "")).strip()
+        if not wallet_raw:
+            return web.json_response({"error": "wallet is required"}, status=400)
+        try:
+            wallet = normalize_address(wallet_raw)
+            deleted = self.storage.delete_monitored_wallet(wallet)
+            if not deleted:
+                return web.json_response({"error": f"wallet not found: {wallet}"}, status=404)
+            self.reload_my_wallets()
+            self.bump_my_wallet_revision()
+            return web.json_response(
+                {
+                    "ok": True,
+                    "wallets": sorted(self.get_my_wallets()),
+                    "items": self.storage.list_monitored_wallets(),
+                    "count": len(self.get_my_wallets()),
+                }
+            )
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def wallet_recalc_handler(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json body"}, status=400)
+
+        project = str(payload.get("project", "")).strip()
+        wallet_raw = str(payload.get("wallet", "")).strip()
+        if not project:
+            return web.json_response({"error": "project is required"}, status=400)
+        if not wallet_raw:
+            return web.json_response({"error": "wallet is required"}, status=400)
+
+        try:
+            wallet = normalize_address(wallet_raw)
+            if wallet not in self.get_my_wallets():
+                return web.json_response({"error": f"wallet not monitored: {wallet}"}, status=400)
+
+            if self.wallet_recalc_lock.locked():
+                return web.json_response({"error": "another wallet recalc is running"}, status=409)
+
+            started = time.time()
+            async with self.wallet_recalc_lock:
+                result = self.storage.rebuild_wallet_position_for_project_wallet(project, wallet)
+            duration_ms = int((time.time() - started) * 1000)
+            return web.json_response(
+                {
+                    "ok": True,
+                    "project": result["project"],
+                    "wallet": result["wallet"],
+                    "eventCount": int(result["eventCount"]),
+                    "tokenCount": int(result["tokenCount"]),
+                    "durationMs": duration_ms,
+                }
+            )
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
     async def launch_config_upsert_handler(self, request: web.Request) -> web.Response:
         try:
             payload = await request.json()
@@ -1870,7 +2827,7 @@ class VirtualsBot:
         try:
             name = str(payload.get("name", "")).strip()
             if not name:
-                raise ValueError("name 不能为空")
+                raise ValueError("name cannot be empty")
             internal_pool_addr = normalize_address(str(payload.get("internal_pool_addr", "")).strip())
             is_enabled = bool(payload.get("is_enabled", True))
             switch_only = bool(payload.get("switch_only", False))
@@ -1888,7 +2845,9 @@ class VirtualsBot:
                 self.storage.set_launch_config_enabled_only(name)
 
             self.reload_launch_configs()
-            self.ws_reconnect_event.set()
+            self.bump_launch_config_revision()
+            if self.is_realtime_role:
+                self.ws_reconnect_event.set()
             rows = self.storage.list_launch_configs()
             return web.json_response(
                 {
@@ -1907,9 +2866,11 @@ class VirtualsBot:
         try:
             deleted = self.storage.delete_launch_config(name)
             if not deleted:
-                return web.json_response({"error": f"项目不存在: {name}"}, status=404)
+                return web.json_response({"error": f"project not found: {name}"}, status=404)
             self.reload_launch_configs()
-            self.ws_reconnect_event.set()
+            self.bump_launch_config_revision()
+            if self.is_realtime_role:
+                self.ws_reconnect_event.set()
             rows = self.storage.list_launch_configs()
             return web.json_response(
                 {
@@ -1925,7 +2886,7 @@ class VirtualsBot:
         launch_configs = self.storage.list_launch_configs()
         projects = self.storage.list_projects()
         monitoring_projects = [x.name for x in self.get_launch_configs()]
-        wallets = sorted(list(self.cfg.my_wallets))
+        wallets = sorted(list(self.get_my_wallets()))
         return web.json_response(
             {
                 "projects": projects,
@@ -1949,7 +2910,8 @@ class VirtualsBot:
         project = request.query.get("project")
         project = str(project).strip() if project else None
         data = self.storage.query_wallets(project=project)
-        data = [x for x in data if normalize_address(str(x.get("wallet", ""))) in self.cfg.my_wallets]
+        current_wallets = self.get_my_wallets()
+        data = [x for x in data if normalize_address(str(x.get("wallet", ""))) in current_wallets]
         return web.json_response({"count": len(data), "items": data})
 
     async def wallet_detail_handler(self, request: web.Request) -> web.Response:
@@ -2021,6 +2983,10 @@ class VirtualsBot:
         app.router.add_get("/launch-configs", self.launch_configs_handler)
         app.router.add_post("/launch-configs", self.launch_config_upsert_handler)
         app.router.add_delete("/launch-configs/{name}", self.launch_config_delete_handler)
+        app.router.add_get("/wallet-configs", self.monitored_wallets_handler)
+        app.router.add_post("/wallet-configs", self.monitored_wallet_add_handler)
+        app.router.add_delete("/wallet-configs/{wallet}", self.monitored_wallet_delete_handler)
+        app.router.add_post("/wallet-recalc", self.wallet_recalc_handler)
         app.router.add_post("/scan-range", self.scan_range_handler)
         app.router.add_get("/scan-jobs/{job_id}", self.scan_job_detail_handler)
         app.router.add_post("/scan-jobs/{job_id}/cancel", self.scan_job_cancel_handler)
@@ -2035,22 +3001,37 @@ class VirtualsBot:
     async def run(self) -> None:
         await self.price_service.start()
 
-        for _ in range(max(1, self.cfg.receipt_workers)):
-            self.tasks.append(asyncio.create_task(self.consumer_loop()))
-        self.tasks.append(asyncio.create_task(self.flush_loop()))
-        self.tasks.append(asyncio.create_task(self.ws_loop()))
-        self.tasks.append(asyncio.create_task(self.backfill_loop()))
+        if self.is_realtime_role or self.is_backfill_role:
+            for _ in range(max(1, self.cfg.receipt_workers)):
+                self.tasks.append(asyncio.create_task(self.consumer_loop()))
+        if self.consume_events_from_bus:
+            self.tasks.append(asyncio.create_task(self.bus_writer_loop()))
+        elif self.is_writer_role:
+            self.tasks.append(asyncio.create_task(self.flush_loop()))
+        if self.is_realtime_role:
+            self.tasks.append(asyncio.create_task(self.ws_loop()))
+        if self.is_backfill_role:
+            self.tasks.append(asyncio.create_task(self.backfill_loop()))
+        if self.role in {"realtime", "backfill"}:
+            self.tasks.append(asyncio.create_task(self.role_heartbeat_loop()))
+            self.tasks.append(asyncio.create_task(self.launch_config_watch_loop()))
+            self.tasks.append(asyncio.create_task(self.my_wallet_watch_loop()))
+        if self.role == "backfill":
+            self.tasks.append(asyncio.create_task(self.scan_job_dispatch_loop()))
 
-        app = await self.create_api_app()
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, host=self.cfg.api_host, port=self.cfg.api_port)
-        await site.start()
+        runner: Optional[web.AppRunner] = None
+        if self.enable_api:
+            app = await self.create_api_app()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, host=self.cfg.api_host, port=self.cfg.api_port)
+            await site.start()
 
         while not self.stop_event.is_set():
             await asyncio.sleep(1)
 
-        await runner.cleanup()
+        if runner is not None:
+            await runner.cleanup()
 
     async def shutdown(self) -> None:
         self.stop_event.set()
@@ -2060,12 +3041,13 @@ class VirtualsBot:
             with contextlib.suppress(asyncio.CancelledError):
                 await t
         await self.price_service.stop()
-        await self.flush_once(force=True)
+        if self.is_writer_role and not self.consume_events_from_bus:
+            await self.flush_once(force=True)
 
 
-async def main_async(config_path: str) -> None:
+async def main_async(config_path: str, role: str) -> None:
     cfg = load_config(config_path)
-    async with VirtualsBot(cfg) as bot:
+    async with VirtualsBot(cfg, role=role) as bot:
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
 
@@ -2092,20 +3074,26 @@ async def main_async(config_path: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Virtuals 打新/内盘实时扫描机器人 v1.1")
+    parser = argparse.ArgumentParser(description="Virtuals monitor v2.0.0 split-role runtime")
     parser.add_argument(
         "--config",
         default="./config.json",
-        help="配置文件路径（默认 ./config.json）",
+        help="config file path (default: ./config.json)",
+    )
+    parser.add_argument(
+        "--role",
+        default="all",
+        choices=["all", "writer", "realtime", "backfill"],
+        help="run role: all | writer | realtime | backfill",
     )
     args = parser.parse_args()
 
     try:
-        asyncio.run(main_async(args.config))
+        asyncio.run(main_async(args.config, args.role))
     except KeyboardInterrupt:
         pass
     except InvalidOperation as e:
-        raise SystemExit(f"Decimal 计算错误: {e}") from e
+        raise SystemExit(f"Decimal calculation error: {e}") from e
 
 
 if __name__ == "__main__":

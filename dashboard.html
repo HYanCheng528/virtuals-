@@ -280,6 +280,37 @@
       flex-wrap: wrap;
     }
 
+    .wallet-config-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .wallet-config-list {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .wallet-chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(16, 35, 66, 0.35);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .wallet-chip .pill {
+      padding: 4px 10px;
+    }
+
     .hint {
       color: var(--muted);
       font-size: 12px;
@@ -505,6 +536,12 @@
 
     <section class="card">
       <div class="section-title">我的钱包持仓</div>
+      <div class="wallet-config-bar">
+        <input id="walletInput" class="pill-input" placeholder="添加监控钱包 0x..." />
+        <button id="addWalletBtn" class="pill">添加钱包</button>
+        <span id="walletCfgMessage" class="hint">可在此新增/删除监控钱包，保存到本地数据库。</span>
+      </div>
+      <div id="walletConfigList" class="wallet-config-list"></div>
       <div class="table-wrap">
         <table id="walletTable">
           <thead>
@@ -563,6 +600,10 @@
     const parsedValue = document.getElementById("parsedValue");
     const minuteMeta = document.getElementById("minuteMeta");
     const walletBody = document.querySelector("#walletTable tbody");
+    const walletInput = document.getElementById("walletInput");
+    const addWalletBtn = document.getElementById("addWalletBtn");
+    const walletCfgMessage = document.getElementById("walletCfgMessage");
+    const walletConfigList = document.getElementById("walletConfigList");
     const leaderBody = document.querySelector("#leaderTable tbody");
     const txDelayBody = document.querySelector("#txDelayTable tbody");
     const launchConfigBody = document.querySelector("#launchConfigTable tbody");
@@ -587,6 +628,8 @@
     let autoRefreshMs = NORMAL_REFRESH_MS;
     let autoRefreshTimer = null;
     let currentScanJobId = null;
+    let monitoredWallets = [];
+    let launchConfigRowsCache = [];
 
     const toNum = (v) => {
       const n = Number(v);
@@ -754,6 +797,30 @@
       }
     }
 
+    function renderMonitoredWallets(rows) {
+      monitoredWallets = (rows || [])
+        .map((x) => String(x || "").trim().toLowerCase())
+        .filter((x) => x);
+      walletConfigList.innerHTML = "";
+      if (!monitoredWallets.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted";
+        empty.textContent = "当前未配置监控钱包。";
+        walletConfigList.appendChild(empty);
+        return;
+      }
+      monitoredWallets.forEach((wallet) => {
+        const row = document.createElement("div");
+        row.className = "wallet-chip";
+        row.innerHTML = `
+          <span>${addrWithCopyHtml(wallet)}</span>
+          <button class="pill wallet-recalc-btn" type="button" data-wallet-recalc="${escAttr(wallet)}">重算当前项目</button>
+          <button class="pill wallet-remove-btn" type="button" data-wallet-remove="${escAttr(wallet)}">删除</button>
+        `;
+        walletConfigList.appendChild(row);
+      });
+    }
+
     function restartAutoRefreshTimer() {
       if (autoRefreshTimer) {
         clearInterval(autoRefreshTimer);
@@ -798,6 +865,9 @@
     async function loadMeta() {
       const meta = await jget("/meta");
       const current = projectSelect.value || loadSavedProject();
+      if (Array.isArray(meta.launchConfigs)) {
+        launchConfigRowsCache = meta.launchConfigs;
+      }
       projectSelect.innerHTML = "";
       for (const p of meta.projects || []) {
         const opt = document.createElement("option");
@@ -818,6 +888,8 @@
           `supply=${fmtNum(meta.fixedDefaults.token_total_supply, 0)} | ` +
           `fee_rate=${fmtNum(meta.fixedDefaults.fee_rate, 6)}`;
       }
+      renderMonitoredWallets(meta.wallets || []);
+      syncLaunchFormToSelectedProject(projectSelect.value);
       return meta;
     }
 
@@ -880,6 +952,18 @@
       lcInternalPool.value = row.internal_pool_addr || "";
     }
 
+    function syncLaunchFormToSelectedProject(preferName) {
+      const rows = launchConfigRowsCache || [];
+      if (!rows.length) {
+        return false;
+      }
+      const targetName = String(preferName || projectSelect.value || "").trim();
+      const row =
+        rows.find((x) => String(x?.name || "").trim() === targetName) || rows[0];
+      fillLaunchForm(row);
+      return true;
+    }
+
     function renderLaunchConfigTable(rows) {
       launchConfigBody.innerHTML = "";
       rows.forEach((r) => {
@@ -903,10 +987,9 @@
     async function loadLaunchConfigs() {
       const data = await jget("/launch-configs");
       const rows = data.items || [];
+      launchConfigRowsCache = rows;
       renderLaunchConfigTable(rows);
-      if (!lcName.value && rows.length) {
-        fillLaunchForm(rows[0]);
-      }
+      syncLaunchFormToSelectedProject();
       return rows;
     }
 
@@ -943,7 +1026,9 @@
         projectSelect.value = payload.name;
         saveSelectedProject(projectSelect.value);
       }
-      renderLaunchConfigTable(data.items || []);
+      launchConfigRowsCache = data.items || [];
+      renderLaunchConfigTable(launchConfigRowsCache);
+      syncLaunchFormToSelectedProject(payload.name || projectSelect.value);
       await refreshAllSafe();
     }
 
@@ -960,15 +1045,61 @@
       const data = await requestJsonWithBody(`/launch-configs/${encodeURIComponent(name)}`, "DELETE");
       lcMessage.textContent = `删除成功，当前监控项目：${(data.monitoringProjects || []).join(", ") || "无"}`;
       await loadMeta();
-      renderLaunchConfigTable(data.items || []);
+      launchConfigRowsCache = data.items || [];
+      renderLaunchConfigTable(launchConfigRowsCache);
       if (![...projectSelect.options].some(o => o.value === projectSelect.value) && projectSelect.options.length > 0) {
         projectSelect.value = projectSelect.options[0].value;
       }
       saveSelectedProject(projectSelect.value);
-      if (projectSelect.value) {
-        const row = (data.items || []).find(x => x.name === projectSelect.value);
-        if (row) fillLaunchForm(row);
+      syncLaunchFormToSelectedProject(projectSelect.value);
+      await refreshAllSafe();
+      return true;
+    }
+
+    async function addMonitoredWallet() {
+      const wallet = walletInput.value.trim();
+      if (!wallet) {
+        throw new Error("请输入钱包地址");
       }
+      const data = await requestJsonWithBody("/wallet-configs", "POST", { wallet });
+      renderMonitoredWallets(data.items || []);
+      walletInput.value = "";
+      walletCfgMessage.textContent = `钱包已保存，当前监控数：${data.count ?? (data.items || []).length}`;
+      await refreshAllSafe();
+      return true;
+    }
+
+    async function deleteMonitoredWallet(wallet) {
+      const target = String(wallet || "").trim();
+      if (!target) {
+        throw new Error("缺少钱包地址");
+      }
+      const data = await requestJsonWithBody(
+        `/wallet-configs/${encodeURIComponent(target)}`,
+        "DELETE"
+      );
+      renderMonitoredWallets(data.items || []);
+      walletCfgMessage.textContent = `钱包已删除，当前监控数：${data.count ?? (data.items || []).length}`;
+      await refreshAllSafe();
+      return true;
+    }
+
+    async function recalcWalletForCurrentProject(wallet) {
+      const project = String(projectSelect.value || "").trim();
+      if (!project) {
+        throw new Error("请先选择项目");
+      }
+      const target = String(wallet || "").trim();
+      if (!target) {
+        throw new Error("缺少钱包地址");
+      }
+      const data = await requestJsonWithBody("/wallet-recalc", "POST", {
+        project,
+        wallet: target,
+      });
+      walletCfgMessage.textContent =
+        `重算完成：项目=${data.project} 钱包=${shortAddr(data.wallet)} ` +
+        `事件=${data.eventCount} 代币=${data.tokenCount} 耗时=${data.durationMs}ms`;
       await refreshAllSafe();
       return true;
     }
@@ -1323,6 +1454,52 @@
     }
 
     document.addEventListener("click", async (ev) => {
+      const recalcBtn = ev.target.closest(".wallet-recalc-btn");
+      if (recalcBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const wallet = recalcBtn.getAttribute("data-wallet-recalc") || "";
+        const old = recalcBtn.textContent || "重算当前项目";
+        recalcBtn.disabled = true;
+        recalcBtn.textContent = "重算中...";
+        try {
+          await recalcWalletForCurrentProject(wallet);
+          recalcBtn.textContent = "已重算";
+        } catch (e) {
+          recalcBtn.textContent = "失败";
+          walletCfgMessage.textContent = `重算失败：${e.message || e}`;
+        } finally {
+          setTimeout(() => {
+            recalcBtn.disabled = false;
+            recalcBtn.textContent = old;
+          }, 900);
+        }
+        return;
+      }
+
+      const removeBtn = ev.target.closest(".wallet-remove-btn");
+      if (removeBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const wallet = removeBtn.getAttribute("data-wallet-remove") || "";
+        const old = removeBtn.textContent || "删除";
+        removeBtn.disabled = true;
+        removeBtn.textContent = "删除中...";
+        try {
+          await deleteMonitoredWallet(wallet);
+          removeBtn.textContent = "已删除";
+        } catch (e) {
+          removeBtn.textContent = "失败";
+          walletCfgMessage.textContent = `删除失败：${e.message || e}`;
+        } finally {
+          setTimeout(() => {
+            removeBtn.disabled = false;
+            removeBtn.textContent = old;
+          }, 900);
+        }
+        return;
+      }
+
       const btn = ev.target.closest(".copy-btn");
       if (!btn) return;
       ev.preventDefault();
@@ -1375,6 +1552,7 @@
     });
     projectSelect.addEventListener("change", () => {
       saveSelectedProject(projectSelect.value);
+      syncLaunchFormToSelectedProject(projectSelect.value);
       refreshAllSafe().catch(console.error);
     });
     saveConfigBtn.addEventListener("click", () => {
@@ -1392,6 +1570,20 @@
         deleteLaunchConfig,
         lcMessage
       ).catch(console.error);
+    });
+    addWalletBtn.addEventListener("click", () => {
+      runButtonAction(
+        addWalletBtn,
+        { loading: "添加中...", success: "已添加", failed: "添加失败" },
+        addMonitoredWallet,
+        walletCfgMessage
+      ).catch(console.error);
+    });
+    walletInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        addWalletBtn.click();
+      }
     });
     fastModeBtn.addEventListener("click", () => {
       const enabled = autoRefreshMs !== FAST_REFRESH_MS;
