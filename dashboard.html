@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Virtuals 实时监控面板 v2.1.1</title>
+  <title>Virtuals 实时监控面板 v2.1.2</title>
   <style>
     :root {
       --bg-0: #081425;
@@ -437,7 +437,7 @@
     <section class="header">
       <div>
         <div class="title">Virtuals 实时监控面板</div>
-        <div class="subtitle">v2.1.1 | 三进程 | 链上价格 | 无 Supabase 热路径</div>
+        <div class="subtitle">v2.1.2 | 三进程 | 链上价格 | 无 Supabase 热路径</div>
       </div>
       <div class="controls">
         <select id="projectSelect" class="pill"></select>
@@ -446,7 +446,8 @@
         <button id="scanRangeBtn" class="pill">按区间回扫(UTC+8)</button>
         <button id="scanCancelBtn" class="pill" disabled>取消回扫</button>
         <button id="refreshBtn" class="pill">刷新</button>
-        <button id="fastModeBtn" class="pill">极速模式：关(1s)</button>
+        <button id="fastModeBtn" class="pill">极速模式：关(0.5s)</button>
+        <button id="superModeBtn" class="pill">超速模式：关(0.25s)</button>
         <span id="refreshMessage" class="hint">-</span>
       </div>
     </section>
@@ -618,6 +619,7 @@
     const minuteRangeMessage = document.getElementById("minuteRangeMessage");
     const refreshBtn = document.getElementById("refreshBtn");
     const fastModeBtn = document.getElementById("fastModeBtn");
+    const superModeBtn = document.getElementById("superModeBtn");
     const refreshMessage = document.getElementById("refreshMessage");
     const refreshPerf = document.getElementById("refreshPerf");
     const delayPerf = document.getElementById("delayPerf");
@@ -646,7 +648,8 @@
     const deleteConfigBtn = document.getElementById("deleteConfigBtn");
     const fixedInfo = document.getElementById("fixedInfo");
     const lcMessage = document.getElementById("lcMessage");
-    const FAST_MODE_STORAGE_KEY = "virtuals_fast_mode";
+    const LEGACY_FAST_MODE_STORAGE_KEY = "virtuals_fast_mode";
+    const REFRESH_MODE_STORAGE_KEY = "virtuals_refresh_mode";
     const PROJECT_STORAGE_KEY = "virtuals_selected_project";
     const SCAN_START_STORAGE_KEY = "virtuals_scan_start_utc8";
     const SCAN_END_STORAGE_KEY = "virtuals_scan_end_utc8";
@@ -654,13 +657,18 @@
     const MINUTE_END_STORAGE_KEY = "virtuals_minute_end_utc8";
     const NORMAL_REFRESH_MS = 1000;
     const FAST_REFRESH_MS = 500;
+    const SUPER_REFRESH_MS = 250;
+    const SUPER_MODE_GUARD_RATIO = 0.7;
+    const SUPER_MODE_GUARD_HITS = 3;
     let minuteRangeApplied = null;
     let lastChartCssWidth = "";
     let refreshInFlight = false;
     let refreshQueued = false;
     let resizeRefreshTimer = null;
+    let currentRefreshMode = "normal";
     let autoRefreshMs = NORMAL_REFRESH_MS;
     let autoRefreshTimer = null;
+    let superModeOverloadHits = 0;
     let currentScanJobId = null;
     let monitoredWallets = [];
     let launchConfigRowsCache = [];
@@ -829,17 +837,32 @@
       return await r.json();
     }
 
-    function loadFastMode() {
-      try {
-        return localStorage.getItem(FAST_MODE_STORAGE_KEY) === "1";
-      } catch (e) {
-        return false;
+    function normalizeRefreshMode(mode) {
+      if (mode === "normal" || mode === "fast" || mode === "super") {
+        return mode;
       }
+      return "normal";
     }
 
-    function saveFastMode(enabled) {
+    function loadRefreshMode() {
       try {
-        localStorage.setItem(FAST_MODE_STORAGE_KEY, enabled ? "1" : "0");
+        const mode = normalizeRefreshMode(localStorage.getItem(REFRESH_MODE_STORAGE_KEY) || "");
+        if (mode !== "normal") return mode;
+        // Backward compatibility: old bool key only had fast/non-fast.
+        if (localStorage.getItem(LEGACY_FAST_MODE_STORAGE_KEY) === "1") {
+          return "fast";
+        }
+      } catch (e) {
+        // ignore
+      }
+      return "normal";
+    }
+
+    function saveRefreshMode(mode) {
+      try {
+        const normalized = normalizeRefreshMode(mode);
+        localStorage.setItem(REFRESH_MODE_STORAGE_KEY, normalized);
+        localStorage.removeItem(LEGACY_FAST_MODE_STORAGE_KEY);
       } catch (e) {
         // ignore
       }
@@ -929,10 +952,29 @@
       autoRefreshTimer = setInterval(() => refreshAllSafe().catch(console.error), autoRefreshMs);
     }
 
-    function applyFastMode(enabled) {
-      autoRefreshMs = enabled ? FAST_REFRESH_MS : NORMAL_REFRESH_MS;
-      fastModeBtn.textContent = enabled ? "极速模式：开(0.5s)" : "极速模式：关(1s)";
+    function refreshModeMs(mode) {
+      if (mode === "super") return SUPER_REFRESH_MS;
+      if (mode === "fast") return FAST_REFRESH_MS;
+      return NORMAL_REFRESH_MS;
+    }
+
+    function setRefreshMode(mode, { persist = true } = {}) {
+      const nextMode = normalizeRefreshMode(mode);
+      currentRefreshMode = nextMode;
+      autoRefreshMs = refreshModeMs(nextMode);
+      if (nextMode !== "super") {
+        superModeOverloadHits = 0;
+      }
+      fastModeBtn.textContent =
+        nextMode === "fast" ? "极速模式：开(0.5s)" : "极速模式：关(0.5s)";
+      superModeBtn.textContent =
+        nextMode === "super" ? "超速模式：开(0.25s)" : "超速模式：关(0.25s)";
+      fastModeBtn.classList.toggle("is-active", nextMode === "fast");
+      superModeBtn.classList.toggle("is-active", nextMode === "super");
       restartAutoRefreshTimer();
+      if (persist) {
+        saveRefreshMode(nextMode);
+      }
     }
 
     async function copyText(text) {
@@ -1503,7 +1545,7 @@
       wsStatus.innerHTML = health.stats?.ws_connected
         ? `<span class="status ok">已连接</span>`
         : `<span class="status bad">未连接</span>`;
-      priceValue.textContent = fmtNum(health.price, 12);
+      priceValue.innerHTML = numWithExactTitle(fmtNumFixed(health.price, 4), health.price);
       queueValue.textContent = `${health.queueSize} / ${health.pendingTx}`;
       parsedValue.textContent = `${health.stats?.parsed_events || 0} / ${health.stats?.inserted_events || 0}`;
 
@@ -1531,6 +1573,19 @@
       } finally {
         const costMs = Math.round(performance.now() - startedAt);
         refreshPerf.textContent = ok ? `刷新耗时：${costMs}ms` : `刷新耗时：失败(${costMs}ms)`;
+        if (currentRefreshMode === "super") {
+          const thresholdMs = Math.round(SUPER_REFRESH_MS * SUPER_MODE_GUARD_RATIO);
+          if (!ok || costMs > thresholdMs) {
+            superModeOverloadHits += 1;
+          } else {
+            superModeOverloadHits = 0;
+          }
+          if (superModeOverloadHits >= SUPER_MODE_GUARD_HITS) {
+            setRefreshMode("fast");
+            superModeOverloadHits = 0;
+            refreshMessage.textContent = `超速模式自动降级：刷新耗时连续偏高（>${thresholdMs}ms）`;
+          }
+        }
         refreshInFlight = false;
         if (refreshQueued) {
           refreshQueued = false;
@@ -1761,10 +1816,18 @@
       });
     });
     fastModeBtn.addEventListener("click", () => {
-      const enabled = autoRefreshMs !== FAST_REFRESH_MS;
-      saveFastMode(enabled);
-      applyFastMode(enabled);
-      refreshMessage.textContent = enabled ? "极速模式已开启：0.5秒刷新" : "极速模式已关闭：1秒刷新";
+      const targetMode = currentRefreshMode === "fast" ? "normal" : "fast";
+      setRefreshMode(targetMode);
+      refreshMessage.textContent =
+        targetMode === "fast" ? "极速模式已开启：0.5秒刷新" : "极速模式已关闭：1秒刷新";
+    });
+    superModeBtn.addEventListener("click", () => {
+      const targetMode = currentRefreshMode === "super" ? "fast" : "super";
+      setRefreshMode(targetMode);
+      refreshMessage.textContent =
+        targetMode === "super"
+          ? "超速模式已开启：0.25秒刷新（高耗时将自动降级）"
+          : "超速模式已关闭：已切回极速模式(0.5秒)";
     });
     window.addEventListener("resize", () => {
       if (resizeRefreshTimer) {
@@ -1775,7 +1838,7 @@
       }, 200);
     });
 
-    applyFastMode(loadFastMode());
+    setRefreshMode(loadRefreshMode(), { persist: false });
     boot();
   </script>
 </body>

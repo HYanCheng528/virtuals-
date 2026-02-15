@@ -1,4 +1,4 @@
-﻿# Virtuals 实时监控机器人（v2.1.1）
+﻿# Virtuals 实时监控机器人（v2.1.2）
 
 ## 功能概览
 - 监听 Base 链 `Transfer` 日志，解析打新/内盘买入事件
@@ -63,6 +63,9 @@ python virtuals_bot.py --config .\config.json --role all
 ## 访问地址
 - Dashboard: `http://127.0.0.1:8080/`
 - Health: `http://127.0.0.1:8080/health`
+
+## v2.1.2 文档
+- 更新说明：`RELEASE_v2.1.2_更新说明.md`
 
 ## v2.1.1 文档
 - 更新说明：`RELEASE_v2.1.1_更新说明.md`
