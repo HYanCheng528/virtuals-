@@ -2972,6 +2972,9 @@ class VirtualsBot:
     async def dashboard_handler(self, request: web.Request) -> web.Response:
         return web.FileResponse(self.base_dir / "dashboard.html")
 
+    async def favicon_handler(self, request: web.Request) -> web.Response:
+        return web.FileResponse(self.base_dir / "favicon-vpulse.svg")
+
     async def wallets_handler(self, request: web.Request) -> web.Response:
         project = request.query.get("project")
         project = str(project).strip() if project else None
@@ -3045,6 +3048,7 @@ class VirtualsBot:
     async def create_api_app(self) -> web.Application:
         app = web.Application()
         app.router.add_get("/", self.dashboard_handler)
+        app.router.add_get("/favicon-vpulse.svg", self.favicon_handler)
         app.router.add_get("/meta", self.meta_handler)
         app.router.add_get("/launch-configs", self.launch_configs_handler)
         app.router.add_post("/launch-configs", self.launch_config_upsert_handler)
@@ -3147,7 +3151,7 @@ async def main_async(config_path: str, role: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Virtuals monitor v2.1.2 split-role runtime")
+    parser = argparse.ArgumentParser(description="V-Pulse monitor v3.0.0 split-role runtime")
     parser.add_argument(
         "--config",
         default="./config.json",
