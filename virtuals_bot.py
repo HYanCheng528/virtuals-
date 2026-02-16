@@ -501,6 +501,12 @@ class Storage:
                 PRIMARY KEY(project, buyer)
             );
 
+            CREATE TABLE IF NOT EXISTS project_stats (
+                project TEXT PRIMARY KEY,
+                sum_tax_v TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS system_state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
@@ -878,6 +884,7 @@ class Storage:
         minute_deltas: Dict[Tuple[str, int], Dict[str, Any]] = {}
         minute_buyers: Set[Tuple[str, int, str]] = set()
         leaderboard_deltas: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        project_tax_deltas: Dict[str, Decimal] = {}
 
         cur = self.conn.cursor()
         cur.execute("BEGIN")
@@ -925,6 +932,9 @@ class Storage:
                 ld["spent"] += e["spent_v_est"]
                 ld["token"] += e["token_bought"]
                 ld["last_tx_time"] = max(ld["last_tx_time"], int(e["block_timestamp"]))
+                project_tax_deltas[e["project"]] = (
+                    project_tax_deltas.get(e["project"], Decimal(0)) + e["tax_v"]
+                )
 
                 if e["is_my_wallet"]:
                     wkey = (e["project"], e["buyer"], e["token_addr"])
@@ -1085,6 +1095,31 @@ class Storage:
                     ),
                 )
 
+            for project, tax_delta in project_tax_deltas.items():
+                row = cur.execute(
+                    """
+                    SELECT sum_tax_v
+                    FROM project_stats
+                    WHERE project = ?
+                    """,
+                    (project,),
+                ).fetchone()
+                old_tax = Decimal(row["sum_tax_v"]) if row else Decimal(0)
+                cur.execute(
+                    """
+                    INSERT INTO project_stats(project, sum_tax_v, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(project) DO UPDATE SET
+                        sum_tax_v = excluded.sum_tax_v,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        project,
+                        decimal_to_str(old_tax + tax_delta, 18),
+                        int(time.time()),
+                    ),
+                )
+
             if max_block > 0:
                 old = self.get_state("last_processed_block")
                 old_b = int(old) if old else 0
@@ -1179,6 +1214,49 @@ class Storage:
             (project, limit_n),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def query_project_tax(self, project: str) -> Dict[str, Any]:
+        project = str(project).strip()
+        if not project:
+            raise ValueError("project is required")
+        row = self.conn.execute(
+            """
+            SELECT project, sum_tax_v, updated_at
+            FROM project_stats
+            WHERE project = ?
+            """,
+            (project,),
+        ).fetchone()
+        if row:
+            return dict(row)
+
+        # Backward compatibility: build initial total from historical minute_agg once.
+        rows = self.conn.execute(
+            """
+            SELECT minute_tax_v
+            FROM minute_agg
+            WHERE project = ?
+            """,
+            (project,),
+        ).fetchall()
+        total_tax = Decimal(0)
+        for r in rows:
+            if r["minute_tax_v"] is not None:
+                total_tax += Decimal(str(r["minute_tax_v"]))
+        now_ts = int(time.time())
+        total_tax_str = decimal_to_str(total_tax, 18)
+        self.conn.execute(
+            """
+            INSERT INTO project_stats(project, sum_tax_v, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(project) DO UPDATE SET
+                sum_tax_v = excluded.sum_tax_v,
+                updated_at = excluded.updated_at
+            """,
+            (project, total_tax_str, now_ts),
+        )
+        self.conn.commit()
+        return {"project": project, "sum_tax_v": total_tax_str, "updated_at": now_ts}
 
     def rebuild_wallet_position_for_project_wallet(self, project: str, wallet: str) -> Dict[str, Any]:
         project = str(project).strip()
@@ -3045,6 +3123,16 @@ class VirtualsBot:
         data = self.storage.query_event_delays(project, limit_n)
         return web.json_response({"project": project, "count": len(data), "items": data})
 
+    async def project_tax_handler(self, request: web.Request) -> web.Response:
+        project = request.query.get("project")
+        if not project:
+            return web.json_response({"error": "project is required"}, status=400)
+        try:
+            data = self.storage.query_project_tax(project)
+            return web.json_response(data)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
     async def create_api_app(self) -> web.Application:
         app = web.Application()
         app.router.add_get("/", self.dashboard_handler)
@@ -3068,6 +3156,7 @@ class VirtualsBot:
         app.router.add_get("/minutes", self.minutes_handler)
         app.router.add_get("/leaderboard", self.leaderboard_handler)
         app.router.add_get("/event-delays", self.event_delays_handler)
+        app.router.add_get("/project-tax", self.project_tax_handler)
         return app
 
     async def run(self) -> None:
@@ -3151,7 +3240,7 @@ async def main_async(config_path: str, role: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="V-Pulse monitor v3.0.0 split-role runtime")
+    parser = argparse.ArgumentParser(description="V-Pulse monitor v3.1.0 split-role runtime")
     parser.add_argument(
         "--config",
         default="./config.json",

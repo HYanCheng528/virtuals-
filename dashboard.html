@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#0b1426" />
   <link rel="icon" type="image/svg+xml" href="./favicon-vpulse.svg" />
-  <title>V-Pulse 盘面雷达 v3.0.0</title>
+  <title>V-Pulse 盘面雷达 v3.1.0</title>
   <style>
     :root {
       --bg: #070b14;
@@ -205,6 +205,12 @@
     .grid-4 {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .grid-5 {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 16px;
     }
 
@@ -560,6 +566,10 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
+      .grid-5 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .grid-2 {
         grid-template-columns: 1fr;
       }
@@ -583,7 +593,7 @@
     <section class="header">
       <div>
         <div class="title">V-Pulse 盘面雷达</div>
-        <div class="subtitle">v3.0.0 | 三进程 | 链上价格 | 无 Supabase 热路径</div>
+        <div class="subtitle">v3.1.0 | 三进程 | 链上价格 | 无 Supabase 热路径</div>
       </div>
       <div class="controls">
         <select id="projectSelect" class="pill"></select>
@@ -655,7 +665,7 @@
       </div>
     </section>
 
-    <section class="grid-4">
+    <section class="grid-5">
       <div class="card">
         <div class="kpi-title">连接状态</div>
         <div id="wsStatus" class="kpi-value">-</div>
@@ -671,6 +681,10 @@
       <div class="card">
         <div class="kpi-title">已解析 / 已入库</div>
         <div id="parsedValue" class="kpi-value">-</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">项目累计税收(V)</div>
+        <div id="projectTaxValue" class="kpi-value">-</div>
       </div>
     </section>
 
@@ -778,6 +792,7 @@
     const priceValue = document.getElementById("priceValue");
     const queueValue = document.getElementById("queueValue");
     const parsedValue = document.getElementById("parsedValue");
+    const projectTaxValue = document.getElementById("projectTaxValue");
     const minuteMeta = document.getElementById("minuteMeta");
     const walletBody = document.querySelector("#walletTable tbody");
     const walletInput = document.getElementById("walletInput");
@@ -1778,12 +1793,14 @@
         tasks.push(jget(`/minutes?project=${encodeURIComponent(project)}&from=${from}&to=${to}`));
         tasks.push(jget(`/leaderboard?project=${encodeURIComponent(project)}&top=20`));
         tasks.push(jget(`/event-delays?project=${encodeURIComponent(project)}&limit=80`));
+        tasks.push(jget(`/project-tax?project=${encodeURIComponent(project)}`));
       } else {
         tasks.push(Promise.resolve({ items: [] }));
         tasks.push(Promise.resolve({ items: [] }));
         tasks.push(Promise.resolve({ items: [] }));
+        tasks.push(Promise.resolve({ sum_tax_v: "0" }));
       }
-      const [health, wallets, minutes, leader, txDelays] = await Promise.all(tasks);
+      const [health, wallets, minutes, leader, txDelays, projectTax] = await Promise.all(tasks);
 
       wsStatus.innerHTML = health.stats?.ws_connected
         ? `<span class="status ok">已连接</span>`
@@ -1791,6 +1808,9 @@
       priceValue.innerHTML = numWithExactTitle(fmtNumFixed(health.price, 4), health.price);
       queueValue.textContent = `${health.queueSize} / ${health.pendingTx}`;
       parsedValue.textContent = `${health.stats?.parsed_events || 0} / ${health.stats?.inserted_events || 0}`;
+      projectTaxValue.innerHTML = project
+        ? numWithExactTitle(fmtNum(projectTax?.sum_tax_v ?? 0, 2), projectTax?.sum_tax_v ?? 0)
+        : "-";
 
       const minuteRows = minutes.items || [];
       drawMinuteChart(minuteRows);
