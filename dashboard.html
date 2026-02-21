@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#0b1426" />
   <link rel="icon" type="image/svg+xml" href="./favicon-vpulse.svg" />
-  <title>V-Pulse 盘面雷达 v3.1.0</title>
+  <title>V-Pulse 盘面雷达 v4.0.0</title>
   <style>
     :root {
       --bg: #070b14;
@@ -168,11 +168,13 @@
       padding: 0 12px;
     }
 
-    .pill-input[type="datetime-local"] {
+    .pill-input[type="datetime-local"],
+    .field input[type="datetime-local"] {
       color-scheme: dark;
     }
 
-    .pill-input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+    .pill-input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+    .field input[type="datetime-local"]::-webkit-calendar-picker-indicator {
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='16' rx='2'/%3E%3Cline x1='16' y1='3' x2='16' y2='7'/%3E%3Cline x1='8' y1='3' x2='8' y2='7'/%3E%3Cline x1='3' y1='11' x2='21' y2='11'/%3E%3C/svg%3E");
       background-size: 14px 14px;
       background-position: center;
@@ -182,7 +184,8 @@
       cursor: pointer;
     }
 
-    .pill-input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover {
+    .pill-input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover,
+    .field input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover {
       opacity: 1;
     }
 
@@ -264,6 +267,12 @@
       background: rgba(255, 107, 107, 0.12);
     }
 
+    .draft-status {
+      color: #d9e7ff;
+      border-color: rgba(127, 170, 255, 0.35);
+      background: rgba(127, 170, 255, 0.14);
+    }
+
     .grid-2 {
       display: grid;
       grid-template-columns: 1.25fr 1fr;
@@ -279,12 +288,32 @@
     }
 
     .ui-bar {
-      display: flex;
-      gap: 14px;
-      align-items: center;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 10px;
+      row-gap: 8px;
       padding-top: 14px;
       padding-bottom: 14px;
+    }
+
+    .ui-bar .hint {
+      font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .perf-chip {
+      min-width: 0;
+      min-height: 36px;
+      padding: 0 12px;
+      border: 1px solid var(--divider);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      align-items: center;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
     }
 
     .batch-tuning-row {
@@ -472,9 +501,66 @@
       text-align: right;
     }
 
-    #launchConfigTable th:nth-child(3),
-    #launchConfigTable td:nth-child(3) {
+    #launchConfigTable th:nth-child(4),
+    #launchConfigTable td:nth-child(4) {
       text-align: center;
+    }
+
+    .enable-switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+      vertical-align: middle;
+      cursor: pointer;
+    }
+
+    .enable-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+      position: absolute;
+    }
+
+    .enable-slider {
+      position: absolute;
+      inset: 0;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid var(--border);
+      transition: all var(--t-fast);
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+    }
+
+    .enable-slider::before {
+      content: "";
+      position: absolute;
+      left: 2px;
+      top: 2px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.92);
+      transition: transform var(--t-fast), background-color var(--t-fast);
+    }
+
+    .enable-switch input:checked + .enable-slider {
+      background: rgba(62, 230, 168, 0.34);
+      border-color: rgba(62, 230, 168, 0.52);
+    }
+
+    .enable-switch input:checked + .enable-slider::before {
+      transform: translateX(20px);
+      background: #ffffff;
+    }
+
+    .enable-switch input:disabled + .enable-slider {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .enable-switch:hover .enable-slider {
+      border-color: rgba(255, 255, 255, 0.26);
     }
 
     .delay-good {
@@ -593,7 +679,7 @@
     <section class="header">
       <div>
         <div class="title">V-Pulse 盘面雷达</div>
-        <div class="subtitle">v3.1.0 | 三进程 | 链上价格 | 无 Supabase 热路径</div>
+        <div class="subtitle">v4.0.0 | 三进程 | 链上价格 | 无 Supabase 热路径</div>
       </div>
       <div class="controls">
         <select id="projectSelect" class="pill"></select>
@@ -609,8 +695,11 @@
     </section>
 
     <section class="card ui-bar">
-      <span id="refreshPerf" class="hint">刷新耗时：-</span>
-      <span id="delayPerf" class="hint">录入延迟 P50/P95：-</span>
+      <div class="perf-chip"><span id="refreshPerf" class="hint">刷新耗时：-</span></div>
+      <div class="perf-chip"><span id="delayPerf" class="hint">链上->云端 P50/P95：-</span></div>
+      <div class="perf-chip"><span id="cloudUiPerf" class="hint">云端->界面 P50/P95：-</span></div>
+      <div class="perf-chip"><span id="endToEndPerf" class="hint">端到端 P50/P95：-</span></div>
+      <div class="perf-chip"><span id="apiRttPerf" class="hint">UI请求RTT P50/P95：-</span></div>
     </section>
 
     <section class="card">
@@ -628,23 +717,25 @@
     </section>
 
     <section class="card">
-      <div class="section-title">项目配置管理（仅可修改 name / 内盘地址）</div>
+      <div class="section-title">项目配置管理（支持草稿：可先不填内盘地址）</div>
       <div class="form-grid">
         <div class="field">
           <label for="lcName">name（项目名）</label>
           <input id="lcName" placeholder="例如 WORK2" />
         </div>
         <div class="field">
-          <label for="lcInternalPool">internal_pool_addr（必填）</label>
+          <label for="lcInternalPool">internal_pool_addr（启用时必填）</label>
           <input id="lcInternalPool" placeholder="0x..." />
+        </div>
+        <div class="field">
+          <label for="lcStartUtc8">项目开始时间（UTC+8）</label>
+          <input id="lcStartUtc8" type="datetime-local" />
         </div>
       </div>
 
       <div class="form-actions">
-        <label class="hint">
-          <input id="lcSwitchOnly" type="checkbox" checked />
-          仅监控当前项目（停用其它项目监听，历史数据保留）
-        </label>
+        <button id="newConfigBtn" class="pill">新增项目</button>
+        <button id="saveDraftBtn" class="pill">保存草稿</button>
         <button id="saveConfigBtn" class="pill">保存/切换项目</button>
         <button id="deleteConfigBtn" class="pill">删除项目</button>
         <span id="fixedInfo" class="hint">固定参数：加载中...</span>
@@ -657,6 +748,7 @@
             <tr>
               <th>项目</th>
               <th>内盘地址</th>
+              <th>开始时间(UTC+8)</th>
               <th>启用</th>
             </tr>
           </thead>
@@ -785,6 +877,9 @@
     const hoverTip = document.getElementById("hoverTip");
     const refreshPerf = document.getElementById("refreshPerf");
     const delayPerf = document.getElementById("delayPerf");
+    const cloudUiPerf = document.getElementById("cloudUiPerf");
+    const endToEndPerf = document.getElementById("endToEndPerf");
+    const apiRttPerf = document.getElementById("apiRttPerf");
     const dbBatchInput = document.getElementById("dbBatchInput");
     const applyDbBatchBtn = document.getElementById("applyDbBatchBtn");
     const dbBatchMessage = document.getElementById("dbBatchMessage");
@@ -806,7 +901,9 @@
     const ctx = chart.getContext("2d");
     const lcName = document.getElementById("lcName");
     const lcInternalPool = document.getElementById("lcInternalPool");
-    const lcSwitchOnly = document.getElementById("lcSwitchOnly");
+    const lcStartUtc8 = document.getElementById("lcStartUtc8");
+    const newConfigBtn = document.getElementById("newConfigBtn");
+    const saveDraftBtn = document.getElementById("saveDraftBtn");
     const saveConfigBtn = document.getElementById("saveConfigBtn");
     const deleteConfigBtn = document.getElementById("deleteConfigBtn");
     const fixedInfo = document.getElementById("fixedInfo");
@@ -814,10 +911,11 @@
     const LEGACY_FAST_MODE_STORAGE_KEY = "virtuals_fast_mode";
     const REFRESH_MODE_STORAGE_KEY = "virtuals_refresh_mode";
     const PROJECT_STORAGE_KEY = "virtuals_selected_project";
-    const SCAN_START_STORAGE_KEY = "virtuals_scan_start_utc8";
-    const SCAN_END_STORAGE_KEY = "virtuals_scan_end_utc8";
-    const MINUTE_START_STORAGE_KEY = "virtuals_minute_start_utc8";
-    const MINUTE_END_STORAGE_KEY = "virtuals_minute_end_utc8";
+    const SCAN_START_STORAGE_PREFIX = "virtuals_scan_start_utc8:";
+    const SCAN_END_STORAGE_PREFIX = "virtuals_scan_end_utc8:";
+    const MINUTE_START_STORAGE_PREFIX = "virtuals_minute_start_utc8:";
+    const MINUTE_END_STORAGE_PREFIX = "virtuals_minute_end_utc8:";
+    const HEARTBEAT_INTERVAL_MS = 5000;
     const NORMAL_REFRESH_MS = 1000;
     const FAST_REFRESH_MS = 500;
     const SUPER_REFRESH_MS = 250;
@@ -832,6 +930,7 @@
     let autoRefreshMs = NORMAL_REFRESH_MS;
     let autoRefreshTimer = null;
     let superModeOverloadHits = 0;
+    let heartbeatTimer = null;
     let tipMouseInside = false;
     let tipPointerX = 0;
     let tipPointerY = 0;
@@ -839,6 +938,13 @@
     let monitoredWallets = [];
     let launchConfigRowsCache = [];
     let currentDbBatchSize = null;
+    let serverClockOffsetMs = 0;
+    const apiRttSamplesMs = [];
+    const PERF_SAMPLE_CAP = 200;
+    const PERF_DISPLAY_HISTORY = 6;
+    const perfDisplayState = {};
+    const delayPerfStateByProject = new Map();
+    const SEEN_TX_CAP = 10000;
 
     const toNum = (v) => {
       const n = Number(v);
@@ -855,17 +961,163 @@
       return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo);
     }
 
-    function updateDelayPerf(rows) {
-      const values = rows
-        .map((r) => Number(r.delay_sec))
-        .filter((x) => Number.isFinite(x) && x >= 0);
+    function getSmoothedPerfPair(key, p50, p95) {
+      if (!key) {
+        return { p50, p95 };
+      }
+      if (!perfDisplayState[key]) {
+        perfDisplayState[key] = { p50: [], p95: [] };
+      }
+      const state = perfDisplayState[key];
+      state.p50.push(p50);
+      state.p95.push(p95);
+      if (state.p50.length > PERF_DISPLAY_HISTORY) {
+        state.p50.splice(0, state.p50.length - PERF_DISPLAY_HISTORY);
+      }
+      if (state.p95.length > PERF_DISPLAY_HISTORY) {
+        state.p95.splice(0, state.p95.length - PERF_DISPLAY_HISTORY);
+      }
+      return {
+        p50: percentile(state.p50, 0.5),
+        p95: percentile(state.p95, 0.5),
+      };
+    }
+
+    function setPerfText(el, prefix, values, digits = 2, unit = "s", smoothKey = "") {
       if (!values.length) {
-        delayPerf.textContent = "录入延迟 P50/P95：-";
+        if (smoothKey) {
+          delete perfDisplayState[smoothKey];
+        }
+        el.textContent = `${prefix}：-`;
         return;
       }
-      const p50 = percentile(values, 0.5);
-      const p95 = percentile(values, 0.95);
-      delayPerf.textContent = `录入延迟 P50/P95：${fmtNum(p50, 2)}s / ${fmtNum(p95, 2)}s`;
+      const rawP50 = percentile(values, 0.5);
+      const rawP95 = percentile(values, 0.95);
+      const stable = getSmoothedPerfPair(smoothKey, rawP50, rawP95);
+      if (unit === "auto_delay") {
+        el.textContent = `${prefix}：${fmtDelayDuration(stable.p50, digits)} / ${fmtDelayDuration(stable.p95, digits)}`;
+        return;
+      }
+      el.textContent = `${prefix}：${fmtNum(stable.p50, digits)}${unit} / ${fmtNum(stable.p95, digits)}${unit}`;
+    }
+
+    function pushPerfSample(samples, value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) {
+        return;
+      }
+      samples.push(n);
+      if (samples.length > PERF_SAMPLE_CAP) {
+        samples.splice(0, samples.length - PERF_SAMPLE_CAP);
+      }
+    }
+
+    function getDelayPerfProjectState(projectName) {
+      const key = String(projectName || "__none__").trim() || "__none__";
+      if (!delayPerfStateByProject.has(key)) {
+        delayPerfStateByProject.set(key, {
+          baselineInitialized: false,
+          uiSeenDelaySamplesSec: [],
+          uiSeenEndToEndSamplesSec: [],
+          seenTxHashes: new Set(),
+          seenTxOrder: [],
+        });
+      }
+      return delayPerfStateByProject.get(key);
+    }
+
+    function markTxSeen(state, txHash) {
+      const tx = String(txHash || "").toLowerCase();
+      if (!tx) return false;
+      if (state.seenTxHashes.has(tx)) return false;
+      state.seenTxHashes.add(tx);
+      state.seenTxOrder.push(tx);
+      if (state.seenTxOrder.length > SEEN_TX_CAP) {
+        const removeCount = state.seenTxOrder.length - SEEN_TX_CAP;
+        for (let i = 0; i < removeCount; i += 1) {
+          const oldTx = state.seenTxOrder.shift();
+          if (oldTx) state.seenTxHashes.delete(oldTx);
+        }
+      }
+      return true;
+    }
+
+    function updateApiRttPerf(sampleMs) {
+      pushPerfSample(apiRttSamplesMs, sampleMs);
+      setPerfText(apiRttPerf, "UI请求RTT P50/P95", apiRttSamplesMs, 0, "ms", "api_rtt");
+    }
+
+    function updateDelayPerf(rows, projectName = "") {
+      const safeRows = Array.isArray(rows) ? rows : [];
+      const projectKey = String(projectName || "__none__").trim() || "__none__";
+      const state = getDelayPerfProjectState(projectKey);
+
+      const chainValues = safeRows
+        .map((r) => Number(r.delay_sec))
+        .filter((x) => Number.isFinite(x) && x >= 0);
+      setPerfText(delayPerf, "链上->云端 P50/P95", chainValues, 1, "auto_delay", `chain_cloud:${projectKey}`);
+
+      if (!state.baselineInitialized) {
+        safeRows.forEach((r) => {
+          markTxSeen(state, r.tx_hash);
+        });
+        state.baselineInitialized = true;
+        setPerfText(
+          cloudUiPerf,
+          "云端->界面 P50/P95",
+          state.uiSeenDelaySamplesSec,
+          1,
+          "auto_delay",
+          `cloud_ui:${projectKey}`
+        );
+        setPerfText(
+          endToEndPerf,
+          "端到端 P50/P95",
+          state.uiSeenEndToEndSamplesSec,
+          1,
+          "auto_delay",
+          `end_to_end:${projectKey}`
+        );
+        return;
+      }
+
+      const correctedNowSec = (Date.now() - serverClockOffsetMs) / 1000;
+      safeRows.forEach((r) => {
+        if (!markTxSeen(state, r.tx_hash)) return;
+
+        const recordedAt = Number(r.recorded_at);
+        if (Number.isFinite(recordedAt)) {
+          const cloudDelay = correctedNowSec - recordedAt;
+          if (Number.isFinite(cloudDelay) && cloudDelay >= -1) {
+            pushPerfSample(state.uiSeenDelaySamplesSec, Math.max(0, cloudDelay));
+          }
+        }
+
+        const blockTs = Number(r.block_timestamp);
+        if (Number.isFinite(blockTs)) {
+          const e2eDelay = correctedNowSec - blockTs;
+          if (Number.isFinite(e2eDelay) && e2eDelay >= -1) {
+            pushPerfSample(state.uiSeenEndToEndSamplesSec, Math.max(0, e2eDelay));
+          }
+        }
+      });
+
+      setPerfText(
+        cloudUiPerf,
+        "云端->界面 P50/P95",
+        state.uiSeenDelaySamplesSec,
+        1,
+        "auto_delay",
+        `cloud_ui:${projectKey}`
+      );
+      setPerfText(
+        endToEndPerf,
+        "端到端 P50/P95",
+        state.uiSeenEndToEndSamplesSec,
+        1,
+        "auto_delay",
+        `end_to_end:${projectKey}`
+      );
     }
 
     function delayClass(delaySec) {
@@ -880,6 +1132,15 @@
       const n = Number(v);
       if (!Number.isFinite(n)) return String(v);
       return n.toLocaleString("zh-CN", { maximumFractionDigits: digits });
+    }
+
+    function fmtDelayDuration(seconds, secDigits = 1) {
+      const s = Number(seconds);
+      if (!Number.isFinite(s)) return "-";
+      if (Math.abs(s) < 1) {
+        return `${Math.round(s * 1000)}ms`;
+      }
+      return `${fmtNum(s, secDigits)}s`;
     }
 
     function fmtNumFixed(v, digits = 2) {
@@ -1072,6 +1333,15 @@
       return await r.json();
     }
 
+    async function jgetTimed(url) {
+      const startedAt = performance.now();
+      const data = await jget(url);
+      return {
+        data,
+        costMs: performance.now() - startedAt,
+      };
+    }
+
     function normalizeRefreshMode(mode) {
       if (mode === "normal" || mode === "fast" || mode === "super") {
         return mode;
@@ -1142,6 +1412,99 @@
         localStorage.setItem(key, raw);
       } catch (e) {
         // ignore
+      }
+    }
+
+    function currentProjectName() {
+      return String(projectSelect.value || "").trim();
+    }
+
+    function projectScopedStorageKey(prefix, project) {
+      const p = String(project || "").trim();
+      return `${prefix}${p || "__none__"}`;
+    }
+
+    function scanStartStorageKey(project) {
+      return projectScopedStorageKey(SCAN_START_STORAGE_PREFIX, project);
+    }
+
+    function scanEndStorageKey(project) {
+      return projectScopedStorageKey(SCAN_END_STORAGE_PREFIX, project);
+    }
+
+    function minuteStartStorageKey(project) {
+      return projectScopedStorageKey(MINUTE_START_STORAGE_PREFIX, project);
+    }
+
+    function minuteEndStorageKey(project) {
+      return projectScopedStorageKey(MINUTE_END_STORAGE_PREFIX, project);
+    }
+
+    function getLaunchConfigRowByName(name) {
+      const target = String(name || "").trim();
+      if (!target) return null;
+      return (
+        (launchConfigRowsCache || []).find(
+          (x) => String(x?.name || "").trim() === target
+        ) || null
+      );
+    }
+
+    function getProjectStartTs(project) {
+      const row = getLaunchConfigRowByName(project);
+      if (!row) return null;
+      const ts = Number(row.start_ts);
+      if (!Number.isFinite(ts) || ts <= 0) return null;
+      return Math.floor(ts);
+    }
+
+    function applyProjectTimeWindows(project, { resetToStartDefaults = false } = {}) {
+      const now = Math.floor(Date.now() / 1000);
+      const startTs = getProjectStartTs(project);
+      const hasStartTs = Number.isFinite(startTs) && startTs > 0;
+      const scanDefaultStart = hasStartTs ? startTs : now - 3600;
+      const scanDefaultEnd = hasStartTs ? startTs + 5 * 60 : now;
+      const minuteDefaultStart = hasStartTs ? startTs : now - 3600;
+      const minuteDefaultEnd = hasStartTs ? startTs + 98 * 60 : now;
+
+      const scanStartKey = scanStartStorageKey(project);
+      const scanEndKey = scanEndStorageKey(project);
+      const minuteStartKey = minuteStartStorageKey(project);
+      const minuteEndKey = minuteEndStorageKey(project);
+
+      let scanStartVal = "";
+      let scanEndVal = "";
+      let minuteStartVal = "";
+      let minuteEndVal = "";
+
+      if (!resetToStartDefaults) {
+        scanStartVal = loadSavedDatetimeLocal(scanStartKey);
+        scanEndVal = loadSavedDatetimeLocal(scanEndKey);
+        minuteStartVal = loadSavedDatetimeLocal(minuteStartKey);
+        minuteEndVal = loadSavedDatetimeLocal(minuteEndKey);
+      }
+
+      if (!scanStartVal) scanStartVal = tsToUtc8DatetimeLocal(scanDefaultStart);
+      if (!scanEndVal) scanEndVal = tsToUtc8DatetimeLocal(scanDefaultEnd);
+      if (!minuteStartVal) minuteStartVal = tsToUtc8DatetimeLocal(minuteDefaultStart);
+      if (!minuteEndVal) minuteEndVal = tsToUtc8DatetimeLocal(minuteDefaultEnd);
+
+      scanStartUtc8.value = scanStartVal;
+      scanEndUtc8.value = scanEndVal;
+      minuteStartUtc8.value = minuteStartVal;
+      minuteEndUtc8.value = minuteEndVal;
+
+      saveDatetimeLocal(scanStartKey, scanStartVal);
+      saveDatetimeLocal(scanEndKey, scanEndVal);
+      saveDatetimeLocal(minuteStartKey, minuteStartVal);
+      saveDatetimeLocal(minuteEndKey, minuteEndVal);
+
+      const startApplied = parseUtc8DatetimeLocalToTs(minuteStartVal);
+      const endApplied = parseUtc8DatetimeLocalToTs(minuteEndVal);
+      if (startApplied && endApplied && endApplied >= startApplied) {
+        minuteRangeApplied = { from: startApplied, to: endApplied };
+      } else {
+        minuteRangeApplied = null;
       }
     }
 
@@ -1274,39 +1637,6 @@
       return meta;
     }
 
-    function initScanInputsIfEmpty() {
-      const now = Math.floor(Date.now() / 1000);
-      const savedStart = loadSavedDatetimeLocal(SCAN_START_STORAGE_KEY);
-      const savedEnd = loadSavedDatetimeLocal(SCAN_END_STORAGE_KEY);
-      if (!scanEndUtc8.value) {
-        scanEndUtc8.value = savedEnd || tsToUtc8DatetimeLocal(now);
-      }
-      if (!scanStartUtc8.value) {
-        scanStartUtc8.value = savedStart || tsToUtc8DatetimeLocal(now - 3600);
-      }
-      saveDatetimeLocal(SCAN_START_STORAGE_KEY, scanStartUtc8.value);
-      saveDatetimeLocal(SCAN_END_STORAGE_KEY, scanEndUtc8.value);
-    }
-
-    function initMinuteInputsIfEmpty() {
-      const now = Math.floor(Date.now() / 1000);
-      const savedStart = loadSavedDatetimeLocal(MINUTE_START_STORAGE_KEY);
-      const savedEnd = loadSavedDatetimeLocal(MINUTE_END_STORAGE_KEY);
-      if (!minuteEndUtc8.value) {
-        minuteEndUtc8.value = savedEnd || tsToUtc8DatetimeLocal(now);
-      }
-      if (!minuteStartUtc8.value) {
-        minuteStartUtc8.value = savedStart || tsToUtc8DatetimeLocal(now - 3600);
-      }
-      saveDatetimeLocal(MINUTE_START_STORAGE_KEY, minuteStartUtc8.value);
-      saveDatetimeLocal(MINUTE_END_STORAGE_KEY, minuteEndUtc8.value);
-      const startTs = parseUtc8DatetimeLocalToTs(minuteStartUtc8.value);
-      const endTs = parseUtc8DatetimeLocalToTs(minuteEndUtc8.value);
-      if (startTs && endTs && endTs >= startTs) {
-        minuteRangeApplied = { from: startTs, to: endTs };
-      }
-    }
-
     function getMinuteRangeTs() {
       if (minuteRangeApplied && minuteRangeApplied.to >= minuteRangeApplied.from) {
         return minuteRangeApplied;
@@ -1331,6 +1661,9 @@
         throw new Error("分钟区间结束时间不能早于开始时间");
       }
       minuteRangeApplied = { from: startTs, to: endTs };
+      const project = currentProjectName();
+      saveDatetimeLocal(minuteStartStorageKey(project), minuteStartUtc8.value);
+      saveDatetimeLocal(minuteEndStorageKey(project), minuteEndUtc8.value);
       await refreshAllSafe();
       minuteRangeMessage.textContent = `已应用分钟区间：${fmtTs(startTs)} ~ ${fmtTs(endTs)}`;
       return true;
@@ -1339,6 +1672,17 @@
     function fillLaunchForm(row) {
       lcName.value = row.name || "";
       lcInternalPool.value = row.internal_pool_addr || "";
+      const startTs = Number(row.start_ts);
+      lcStartUtc8.value = Number.isFinite(startTs) && startTs > 0 ? tsToUtc8DatetimeLocal(startTs) : "";
+    }
+
+    function prepareNewLaunchConfig() {
+      lcName.value = "";
+      lcInternalPool.value = "";
+      lcStartUtc8.value = "";
+      lcName.focus();
+      lcMessage.textContent = "已进入新增模式：填写项目信息后点击“保存/切换项目”";
+      return true;
     }
 
     function syncLaunchFormToSelectedProject(preferName) {
@@ -1356,21 +1700,87 @@
     function renderLaunchConfigTable(rows) {
       launchConfigBody.innerHTML = "";
       rows.forEach((r) => {
+        const internalPoolAddr = String(r.internal_pool_addr || "").trim();
+        const isDraft = !internalPoolAddr || !!Number(r.is_draft || 0);
+        const startTs = Number(r.start_ts);
+        const startText = Number.isFinite(startTs) && startTs > 0 ? fmtYmdHm(startTs) : "-";
         const tr = document.createElement("tr");
+        const enabledCellHtml = isDraft
+          ? `<span class="status draft-status">草稿</span>`
+          : `
+            <label class="enable-switch" title="${r.is_enabled ? "已启用" : "已停用"}">
+              <input
+                type="checkbox"
+                class="enable-toggle"
+                data-name="${escAttr(r.name || "")}"
+                data-pool="${escAttr(internalPoolAddr)}"
+                data-start-ts="${escAttr(Number.isFinite(startTs) && startTs > 0 ? String(Math.floor(startTs)) : "")}"
+                ${r.is_enabled ? "checked" : ""}
+              />
+              <span class="enable-slider"></span>
+            </label>
+          `;
         tr.innerHTML = `
           <td>${r.name || "-"}</td>
-          <td>${addrWithCopyHtml(r.internal_pool_addr)}</td>
-          <td>${r.is_enabled ? "是" : "否"}</td>
+          <td>${addrWithCopyHtml(internalPoolAddr)}</td>
+          <td>${startText}</td>
+          <td>${enabledCellHtml}</td>
         `;
         tr.style.cursor = "pointer";
         tr.addEventListener("click", () => fillLaunchForm(r));
+
+        const toggle = tr.querySelector(".enable-toggle");
+        if (toggle) {
+          toggle.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+          });
+          toggle.addEventListener("change", async (ev) => {
+            ev.stopPropagation();
+            const nextEnabled = !!toggle.checked;
+            const name = String(toggle.getAttribute("data-name") || "").trim();
+            const pool = String(toggle.getAttribute("data-pool") || "").trim();
+            const startTsRaw = String(toggle.getAttribute("data-start-ts") || "").trim();
+            const startTs = startTsRaw ? Number(startTsRaw) : null;
+            if (!name || !pool) {
+              toggle.checked = !nextEnabled;
+              lcMessage.textContent = "切换失败：缺少项目参数";
+              return;
+            }
+            toggle.disabled = true;
+            try {
+              await toggleLaunchEnabled(name, pool, nextEnabled, startTs);
+            } catch (e) {
+              toggle.checked = !nextEnabled;
+              lcMessage.textContent = `切换失败：${e.message || e}`;
+            } finally {
+              toggle.disabled = false;
+            }
+          });
+        }
         launchConfigBody.appendChild(tr);
       });
       if (!rows.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="3" class="muted">暂无项目配置。</td>`;
+        tr.innerHTML = `<td colspan="4" class="muted">暂无项目配置。</td>`;
         launchConfigBody.appendChild(tr);
       }
+    }
+
+    async function toggleLaunchEnabled(name, internalPoolAddr, isEnabled, startTs) {
+      const data = await requestJsonWithBody("/launch-configs", "POST", {
+        name,
+        internal_pool_addr: internalPoolAddr,
+        start_ts: Number.isFinite(Number(startTs)) && Number(startTs) > 0 ? Math.floor(Number(startTs)) : null,
+        is_enabled: !!isEnabled,
+        switch_only: false
+      });
+      launchConfigRowsCache = data.items || [];
+      renderLaunchConfigTable(launchConfigRowsCache);
+      await loadMeta();
+      syncLaunchFormToSelectedProject(name || projectSelect.value);
+      lcMessage.textContent = `项目 ${name} 已${isEnabled ? "启用" : "停用"}`;
+      await refreshAllSafe();
+      return true;
     }
 
     async function loadLaunchConfigs() {
@@ -1401,15 +1811,46 @@
       return data;
     }
 
-    async function saveLaunchConfig() {
+    async function sendHeartbeat() {
+      await requestJsonWithBody("/heartbeat", "POST");
+    }
+
+    function startHeartbeatLoop() {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
+      const beat = () => {
+        sendHeartbeat().catch(() => {});
+      };
+      beat();
+      heartbeatTimer = setInterval(beat, HEARTBEAT_INTERVAL_MS);
+    }
+
+    async function saveLaunchConfig(saveAsDraft = false) {
+      const startInput = String(lcStartUtc8.value || "").trim();
+      const startTs = startInput ? parseUtc8DatetimeLocalToTs(startInput) : null;
+      if (startInput && !startTs) {
+        throw new Error("项目开始时间格式无效（UTC+8）");
+      }
+      const name = lcName.value.trim();
+      const internalPoolAddr = lcInternalPool.value.trim();
+      if (!name) {
+        throw new Error("name 不能为空");
+      }
+      if (!saveAsDraft && !internalPoolAddr) {
+        throw new Error("启用项目必须填写 internal_pool_addr");
+      }
       const payload = {
-        name: lcName.value.trim(),
-        internal_pool_addr: lcInternalPool.value.trim(),
-        switch_only: lcSwitchOnly.checked,
-        is_enabled: true
+        name,
+        internal_pool_addr: internalPoolAddr,
+        start_ts: startTs,
+        is_enabled: !saveAsDraft,
+        save_as_draft: !!saveAsDraft
       };
       const data = await requestJsonWithBody("/launch-configs", "POST", payload);
-      lcMessage.textContent = `保存成功，当前监控项目：${(data.monitoringProjects || []).join(", ") || "-"}`;
+      lcMessage.textContent = saveAsDraft
+        ? `草稿已保存：${name}（未启用监听）`
+        : `保存成功，当前监控项目：${(data.monitoringProjects || []).join(", ") || "-"}`;
       await loadMeta();
       if (payload.name && [...projectSelect.options].some(o => o.value === payload.name)) {
         projectSelect.value = payload.name;
@@ -1418,6 +1859,13 @@
       launchConfigRowsCache = data.items || [];
       renderLaunchConfigTable(launchConfigRowsCache);
       syncLaunchFormToSelectedProject(payload.name || projectSelect.value);
+      if (startTs) {
+        applyProjectTimeWindows(projectSelect.value, { resetToStartDefaults: true });
+        minuteRangeMessage.textContent =
+          `已按项目开始时间设定区间：回扫+5分钟，分钟图+98分钟（项目=${projectSelect.value}）`;
+      } else {
+        applyProjectTimeWindows(projectSelect.value, { resetToStartDefaults: false });
+      }
       await refreshAllSafe();
     }
 
@@ -1441,6 +1889,7 @@
       }
       saveSelectedProject(projectSelect.value);
       syncLaunchFormToSelectedProject(projectSelect.value);
+      applyProjectTimeWindows(projectSelect.value, { resetToStartDefaults: false });
       await refreshAllSafe();
       return true;
     }
@@ -1545,6 +1994,9 @@
       if (endTs < startTs) {
         throw new Error("结束时间不能早于开始时间");
       }
+      const selectedProject = currentProjectName();
+      saveDatetimeLocal(scanStartStorageKey(selectedProject), scanStartUtc8.value);
+      saveDatetimeLocal(scanEndStorageKey(selectedProject), scanEndUtc8.value);
       const project = projectSelect.value || null;
       const create = await requestJsonWithBody("/scan-range", "POST", {
         project,
@@ -1756,7 +2208,7 @@
       }
     }
 
-    function renderTxDelayTable(rows) {
+    function renderTxDelayTable(rows, projectName = "") {
       txDelayBody.innerHTML = "";
       rows.forEach((r) => {
         const delaySec = Number(r.delay_sec);
@@ -1765,7 +2217,7 @@
           <td>${hashWithCopyHtml(r.tx_hash)}</td>
           <td>${fmtTs(r.block_timestamp)}</td>
           <td>${fmtTs(r.recorded_at)}</td>
-          <td class="${delayClass(delaySec)}">${fmtNum(delaySec, 0)}</td>
+          <td class="${delayClass(delaySec)}">${fmtNum(Math.max(0, Math.floor(delaySec)), 0)}</td>
         `;
         txDelayBody.appendChild(tr);
       });
@@ -1774,7 +2226,7 @@
         tr.innerHTML = `<td colspan="4" class="muted">暂无交易录入延迟数据。</td>`;
         txDelayBody.appendChild(tr);
       }
-      updateDelayPerf(rows);
+      updateDelayPerf(rows, projectName);
     }
 
     async function refreshAll() {
@@ -1785,22 +2237,38 @@
       const walletUrl = project
         ? `/mywallets?project=${encodeURIComponent(project)}`
         : "/mywallets";
-      const tasks = [
-        jget("/health"),
-        jget(walletUrl),
-      ];
-      if (project) {
-        tasks.push(jget(`/minutes?project=${encodeURIComponent(project)}&from=${from}&to=${to}`));
-        tasks.push(jget(`/leaderboard?project=${encodeURIComponent(project)}&top=20`));
-        tasks.push(jget(`/event-delays?project=${encodeURIComponent(project)}&limit=80`));
-        tasks.push(jget(`/project-tax?project=${encodeURIComponent(project)}`));
-      } else {
-        tasks.push(Promise.resolve({ items: [] }));
-        tasks.push(Promise.resolve({ items: [] }));
-        tasks.push(Promise.resolve({ items: [] }));
-        tasks.push(Promise.resolve({ sum_tax_v: "0" }));
+      const healthTask = jgetTimed("/health");
+      const walletTask = jget(walletUrl);
+      const minuteTask = project
+        ? jget(`/minutes?project=${encodeURIComponent(project)}&from=${from}&to=${to}`)
+        : Promise.resolve({ items: [] });
+      const leaderTask = project
+        ? jget(`/leaderboard?project=${encodeURIComponent(project)}&top=20`)
+        : Promise.resolve({ items: [] });
+      const txDelayTask = project
+        ? jget(`/event-delays?project=${encodeURIComponent(project)}&limit=80`)
+        : Promise.resolve({ items: [] });
+      const projectTaxTask = project
+        ? jget(`/project-tax?project=${encodeURIComponent(project)}`)
+        : Promise.resolve({ sum_tax_v: "0" });
+
+      const [healthRes, wallets, minutes, leader, txDelays, projectTax] = await Promise.all([
+        healthTask,
+        walletTask,
+        minuteTask,
+        leaderTask,
+        txDelayTask,
+        projectTaxTask,
+      ]);
+      const health = healthRes?.data || {};
+      updateApiRttPerf(healthRes?.costMs);
+      const serverNowMs = Number(health.server_now_ms);
+      const serverNowSec = Number(health.server_now);
+      if (Number.isFinite(serverNowMs) && serverNowMs > 0) {
+        serverClockOffsetMs = Date.now() - serverNowMs;
+      } else if (Number.isFinite(serverNowSec) && serverNowSec > 0) {
+        serverClockOffsetMs = Date.now() - serverNowSec * 1000;
       }
-      const [health, wallets, minutes, leader, txDelays, projectTax] = await Promise.all(tasks);
 
       wsStatus.innerHTML = health.stats?.ws_connected
         ? `<span class="status ok">已连接</span>`
@@ -1818,7 +2286,7 @@
 
       renderWalletTable(wallets.items || []);
       renderLeaderTable(leader.items || []);
-      renderTxDelayTable(txDelays.items || []);
+      renderTxDelayTable(txDelays.items || [], project);
     }
 
     async function refreshAllSafe() {
@@ -1859,8 +2327,7 @@
 
     async function boot() {
       try {
-        initScanInputsIfEmpty();
-        initMinuteInputsIfEmpty();
+        startHeartbeatLoop();
         await loadMeta();
         if (!Number.isFinite(currentDbBatchSize)) {
           try {
@@ -1873,6 +2340,7 @@
           }
         }
         await loadLaunchConfigs();
+        applyProjectTimeWindows(projectSelect.value, { resetToStartDefaults: false });
         await refreshAllSafe();
         const minuteRange = getMinuteRangeTs();
         minuteRangeMessage.textContent = `当前分钟区间：${fmtTs(minuteRange.from)} ~ ${fmtTs(minuteRange.to)}`;
@@ -2012,16 +2480,16 @@
       ).catch(console.error);
     });
     scanStartUtc8.addEventListener("change", () => {
-      saveDatetimeLocal(SCAN_START_STORAGE_KEY, scanStartUtc8.value);
+      saveDatetimeLocal(scanStartStorageKey(currentProjectName()), scanStartUtc8.value);
     });
     scanEndUtc8.addEventListener("change", () => {
-      saveDatetimeLocal(SCAN_END_STORAGE_KEY, scanEndUtc8.value);
+      saveDatetimeLocal(scanEndStorageKey(currentProjectName()), scanEndUtc8.value);
     });
     minuteStartUtc8.addEventListener("change", () => {
-      saveDatetimeLocal(MINUTE_START_STORAGE_KEY, minuteStartUtc8.value);
+      saveDatetimeLocal(minuteStartStorageKey(currentProjectName()), minuteStartUtc8.value);
     });
     minuteEndUtc8.addEventListener("change", () => {
-      saveDatetimeLocal(MINUTE_END_STORAGE_KEY, minuteEndUtc8.value);
+      saveDatetimeLocal(minuteEndStorageKey(currentProjectName()), minuteEndUtc8.value);
     });
     scanCancelBtn.addEventListener("click", () => {
       runButtonAction(
@@ -2042,13 +2510,25 @@
     projectSelect.addEventListener("change", () => {
       saveSelectedProject(projectSelect.value);
       syncLaunchFormToSelectedProject(projectSelect.value);
+      applyProjectTimeWindows(projectSelect.value, { resetToStartDefaults: false });
       refreshAllSafe().catch(console.error);
+    });
+    newConfigBtn.addEventListener("click", () => {
+      prepareNewLaunchConfig();
+    });
+    saveDraftBtn.addEventListener("click", () => {
+      runButtonAction(
+        saveDraftBtn,
+        { loading: "保存中...", success: "已保存", failed: "保存失败" },
+        () => saveLaunchConfig(true),
+        lcMessage
+      ).catch(console.error);
     });
     saveConfigBtn.addEventListener("click", () => {
       runButtonAction(
         saveConfigBtn,
         { loading: "保存中...", success: "已保存", failed: "保存失败" },
-        saveLaunchConfig,
+        () => saveLaunchConfig(false),
         lcMessage
       ).catch(console.error);
     });

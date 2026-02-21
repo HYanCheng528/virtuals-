@@ -1,4 +1,4 @@
-# V-Pulse 盘面雷达（V3.1.0）
+# V-Pulse 盘面雷达（V4.0.0）
 
 V-Pulse 是一个面向 Base 链的实时监控与回扫分析工具，支持三进程低延迟架构（writer/realtime/backfill），用于观察项目盘面、买家行为、分钟消耗与钱包持仓。
 
@@ -13,7 +13,9 @@ V-Pulse 是一个面向 Base 链的实时监控与回扫分析工具，支持三
   - 大户榜
   - 我的钱包持仓
   - 交易录入延迟
-  - 项目累计税收(V)（V3.1.0 新增）
+  - 项目累计税收(V)
+  - 云端->界面/端到端延迟统计（UI 首次显示口径）
+  - 无人值守自动休眠（按心跳暂停实时/回扫/价格轮询）
 
 ## 架构说明（三进程）
 - `writer`：唯一写库进程，同时提供 API/UI。
@@ -30,8 +32,8 @@ V-Pulse 是一个面向 Base 链的实时监控与回扫分析工具，支持三
 - `requirements.txt`：依赖
 - `start_3roles.ps1`：一键启动三进程
 - `stop_3roles.ps1`：一键停止三进程
-- `RELEASE_v3.1.0_更新说明.md`：本版本更新日志
-- `RELEASE_v3.1.0_使用说明.md`：详细使用教程
+- `RELEASE_v4.0.0_更新说明.md`：本版本更新日志
+- `RELEASE_v4.0.0_使用说明.md`：详细使用教程
 - `需求文档_v3.0.0.md`：需求说明模板
 
 ## 环境要求
@@ -58,6 +60,8 @@ copy .\config.example.json .\config.json
 - `WS_RPC_URL`
 - `HTTP_RPC_URL`
 - `BACKFILL_HTTP_RPC_URL`
+- `AUTO_IDLE_PAUSE`（建议 `true`）
+- `UI_HEARTBEAT_TIMEOUT_SEC`（建议 `20`）
 
 4. 启动
 ```powershell
@@ -81,7 +85,8 @@ python virtuals_bot.py --config .\config.json --role backfill
 - `GET /leaderboard`：大户榜
 - `GET /mywallets`：我的钱包
 - `GET /event-delays`：录入延迟
-- `GET /project-tax`：项目累计税收（V3.1.0）
+- `GET /project-tax`：项目累计税收
+- `POST /heartbeat`：UI 心跳（用于无人时自动休眠）
 - `POST /scan-range`：发起区间回扫
 - `POST /scan-jobs/{job_id}/cancel`：取消回扫任务
 
@@ -91,7 +96,9 @@ python virtuals_bot.py --config .\config.json --role backfill
 - 没有实时数据：检查 realtime 进程、WS 节点连通性、项目地址正确性。
 
 ## 版本文档
-- `RELEASE_v3.1.0_更新说明.md`
-- `RELEASE_v3.1.0_使用说明.md`
+- `RELEASE_v4.0.0_更新说明.md`
+- `RELEASE_v4.0.0_使用说明.md`
+- `RELEASE_v3.1.0_更新说明.md`（历史）
+- `RELEASE_v3.1.0_使用说明.md`（历史）
 - `RELEASE_v3.0.0_更新说明.md`（历史）
 - `RELEASE_v3.0.0_使用说明.md`（历史）

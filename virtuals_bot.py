@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 from aiohttp import web
@@ -45,6 +45,22 @@ def parse_hex_int(value: Optional[str]) -> int:
     if value is None:
         return 0
     return int(value, 16)
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return default
 
 
 def decode_topic_address(topic: str) -> str:
@@ -151,6 +167,8 @@ class AppConfig:
     event_bus_sqlite_path: str
     api_host: str
     api_port: int
+    auto_idle_pause: bool
+    ui_heartbeat_timeout_sec: int
 
 
 def load_config(path: str) -> AppConfig:
@@ -252,6 +270,8 @@ def load_config(path: str) -> AppConfig:
         event_bus_sqlite_path=str(raw.get("EVENT_BUS_SQLITE_PATH", "./data/virtuals_bus.db")),
         api_host=str(raw.get("API_HOST", "127.0.0.1")),
         api_port=int(raw.get("API_PORT", 8080)),
+        auto_idle_pause=parse_bool(raw.get("AUTO_IDLE_PAUSE"), False),
+        ui_heartbeat_timeout_sec=max(5, int(raw.get("UI_HEARTBEAT_TIMEOUT_SEC", 20))),
     )
 
 
@@ -322,9 +342,15 @@ class RPCClient:
 
 
 class PriceService:
-    def __init__(self, cfg: AppConfig, rpc: RPCClient):
+    def __init__(
+        self,
+        cfg: AppConfig,
+        rpc: RPCClient,
+        should_refresh: Optional[Callable[[], bool]] = None,
+    ):
         self.cfg = cfg
         self.rpc = rpc
+        self.should_refresh = should_refresh or (lambda: True)
         self._price: Optional[Decimal] = None
         self._last_updated: float = 0.0
         self._token0: Optional[str] = None
@@ -339,7 +365,8 @@ class PriceService:
             return
         if not self.cfg.virtual_usdc_pair_addr:
             return
-        await self.refresh_once()
+        if self.should_refresh():
+            await self.refresh_once()
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
@@ -350,10 +377,11 @@ class PriceService:
 
     async def _loop(self) -> None:
         while True:
-            try:
-                await self.refresh_once()
-            except Exception:
-                pass
+            if self.should_refresh():
+                try:
+                    await self.refresh_once()
+                except Exception:
+                    pass
             await asyncio.sleep(max(1, self.cfg.price_refresh_sec))
 
     async def _read_address(self, to: str, selector: str) -> str:
@@ -520,6 +548,7 @@ class Storage:
                 tax_addr TEXT NOT NULL,
                 token_total_supply TEXT NOT NULL,
                 fee_rate TEXT NOT NULL,
+                start_ts INTEGER,
                 is_enabled INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
@@ -548,6 +577,14 @@ class Storage:
             """
         )
         self.conn.commit()
+        self._ensure_launch_config_start_ts_column()
+
+    def _ensure_launch_config_start_ts_column(self) -> None:
+        cols = self.conn.execute("PRAGMA table_info(launch_configs)").fetchall()
+        has_start_ts = any(str(r["name"]).lower() == "start_ts" for r in cols)
+        if not has_start_ts:
+            self.conn.execute("ALTER TABLE launch_configs ADD COLUMN start_ts INTEGER")
+            self.conn.commit()
 
     def get_state(self, key: str) -> Optional[str]:
         cur = self.conn.execute("SELECT value FROM system_state WHERE key = ?", (key,))
@@ -576,8 +613,8 @@ class Storage:
                 """
                 INSERT OR IGNORE INTO launch_configs(
                     name, internal_pool_addr, fee_addr, tax_addr,
-                    token_total_supply, fee_rate, is_enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    token_total_supply, fee_rate, start_ts, is_enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
                 """,
                 (
                     lc.name,
@@ -612,10 +649,17 @@ class Storage:
             """
             SELECT *
             FROM launch_configs
-            ORDER BY updated_at DESC
+            ORDER BY created_at ASC, name ASC
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        items: List[Dict[str, Any]] = []
+        for r in rows:
+            item = dict(r)
+            pool = str(item.get("internal_pool_addr") or "").strip()
+            item["internal_pool_addr"] = normalize_address(pool) if pool else ""
+            item["is_draft"] = 1 if not pool else 0
+            items.append(item)
+        return items
 
     def list_monitored_wallets(self) -> List[str]:
         rows = self.conn.execute(
@@ -628,10 +672,18 @@ class Storage:
         return [normalize_address(str(r["wallet"])) for r in rows if r["wallet"]]
 
     def list_projects(self) -> List[str]:
-        rows = self.conn.execute(
+        launch_rows = self.conn.execute(
             """
-            SELECT name AS project FROM launch_configs
-            UNION
+            SELECT name AS project
+            FROM launch_configs
+            ORDER BY created_at ASC, name ASC
+            """
+        ).fetchall()
+        ordered_projects = [str(r["project"]) for r in launch_rows if r["project"]]
+        ordered_set = set(ordered_projects)
+
+        extra_rows = self.conn.execute(
+            """
             SELECT project FROM events
             UNION
             SELECT project FROM minute_agg
@@ -642,7 +694,12 @@ class Storage:
             ORDER BY project ASC
             """
         ).fetchall()
-        return [str(r["project"]) for r in rows if r["project"]]
+        for r in extra_rows:
+            project = str(r["project"]) if r["project"] else ""
+            if project and project not in ordered_set:
+                ordered_projects.append(project)
+                ordered_set.add(project)
+        return ordered_projects
 
     def get_enabled_launch_configs(self) -> List[LaunchConfig]:
         rows = self.conn.execute(
@@ -650,15 +707,20 @@ class Storage:
             SELECT *
             FROM launch_configs
             WHERE is_enabled = 1
-            ORDER BY name ASC
+              AND COALESCE(TRIM(internal_pool_addr), '') <> ''
+            ORDER BY created_at ASC, name ASC
             """
         ).fetchall()
         result: List[LaunchConfig] = []
         for r in rows:
+            try:
+                internal_pool_addr = normalize_address(r["internal_pool_addr"])
+            except Exception:
+                continue
             result.append(
                 LaunchConfig(
                     name=r["name"],
-                    internal_pool_addr=normalize_address(r["internal_pool_addr"]),
+                    internal_pool_addr=internal_pool_addr,
                     fee_addr=normalize_address(r["fee_addr"]),
                     tax_addr=normalize_address(r["tax_addr"]),
                     token_total_supply=Decimal(str(r["token_total_supply"])),
@@ -678,9 +740,10 @@ class Storage:
         ).fetchone()
         if not row:
             return None
+        internal_pool_raw = str(row["internal_pool_addr"] or "").strip()
         return LaunchConfig(
             name=row["name"],
-            internal_pool_addr=normalize_address(row["internal_pool_addr"]),
+            internal_pool_addr=normalize_address(internal_pool_raw) if internal_pool_raw else "",
             fee_addr=normalize_address(row["fee_addr"]),
             tax_addr=normalize_address(row["tax_addr"]),
             token_total_supply=Decimal(str(row["token_total_supply"])),
@@ -691,11 +754,12 @@ class Storage:
         self,
         *,
         name: str,
-        internal_pool_addr: str,
+        internal_pool_addr: Optional[str],
         fee_addr: str,
         tax_addr: str,
         token_total_supply: Decimal,
         fee_rate: Decimal,
+        start_ts: Optional[int] = None,
         is_enabled: bool = True,
     ) -> None:
         name = name.strip()
@@ -703,29 +767,37 @@ class Storage:
             raise ValueError("name cannot be empty")
         if fee_rate <= 0 or fee_rate >= 1:
             raise ValueError("fee_rate must be in (0,1)")
+        if start_ts is not None and start_ts <= 0:
+            raise ValueError("start_ts must be positive unix seconds")
+        internal_pool_raw = str(internal_pool_addr or "").strip()
+        internal_pool_norm = normalize_address(internal_pool_raw) if internal_pool_raw else ""
+        if is_enabled and not internal_pool_norm:
+            raise ValueError("enabled project requires internal_pool_addr")
         now = int(time.time())
         self.conn.execute(
             """
             INSERT INTO launch_configs(
                 name, internal_pool_addr, fee_addr, tax_addr,
-                token_total_supply, fee_rate, is_enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                token_total_supply, fee_rate, start_ts, is_enabled, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 internal_pool_addr = excluded.internal_pool_addr,
                 fee_addr = excluded.fee_addr,
                 tax_addr = excluded.tax_addr,
                 token_total_supply = excluded.token_total_supply,
                 fee_rate = excluded.fee_rate,
+                start_ts = excluded.start_ts,
                 is_enabled = excluded.is_enabled,
                 updated_at = excluded.updated_at
             """,
             (
                 name,
-                normalize_address(internal_pool_addr),
+                internal_pool_norm,
                 normalize_address(fee_addr),
                 normalize_address(tax_addr),
                 decimal_to_str(token_total_supply, 0),
                 decimal_to_str(fee_rate, 18),
+                int(start_ts) if start_ts is not None else None,
                 1 if is_enabled else 0,
                 now,
                 now,
@@ -751,7 +823,11 @@ class Storage:
         self.conn.execute(
             """
             UPDATE launch_configs
-            SET is_enabled = CASE WHEN name = ? THEN 1 ELSE 0 END,
+            SET is_enabled = CASE
+                    WHEN name = ?
+                     AND COALESCE(TRIM(internal_pool_addr), '') <> '' THEN 1
+                    ELSE 0
+                END,
                 updated_at = ?
             """,
             (name, int(time.time())),
@@ -1782,7 +1858,15 @@ class VirtualsBot:
             self.backfill_http_rpc = self.http_rpc
         self.backfill_rpc_separate = self.backfill_http_rpc is not self.http_rpc
         self.ws_timeout = aiohttp.ClientTimeout(total=None)
-        self.price_service = PriceService(cfg, self.http_rpc)
+        self.ui_heartbeat_role = "ui"
+        self.last_ui_heartbeat_ts = 0
+        self.last_ui_check_at = 0.0
+        self.ui_active_cached = not cfg.auto_idle_pause
+        self.price_service = PriceService(
+            cfg,
+            self.http_rpc,
+            should_refresh=self.should_run_background_rpc,
+        )
         self.queue: asyncio.Queue[Tuple[str, int, bool]] = asyncio.Queue(maxsize=10000)
         self.pending_txs: Set[str] = set()
         self.stop_event = asyncio.Event()
@@ -1806,6 +1890,8 @@ class VirtualsBot:
             "last_ws_block": 0,
             "last_backfill_block": 0,
             "last_flush_at": 0,
+            "idle_paused": False,
+            "ui_last_heartbeat_at": 0,
             "started_at": int(time.time()),
             "role": role,
         }
@@ -1848,6 +1934,39 @@ class VirtualsBot:
         rev = str(int(time.time()))
         self.storage.set_state("my_wallets_rev", rev)
         self.last_my_wallets_rev = rev
+
+    def touch_ui_heartbeat(self) -> int:
+        now = int(time.time())
+        self.last_ui_heartbeat_ts = max(self.last_ui_heartbeat_ts, now)
+        self.last_ui_check_at = 0.0
+        self.stats["ui_last_heartbeat_at"] = self.last_ui_heartbeat_ts
+        payload = {"role": self.ui_heartbeat_role, "updated_at": now, "source": "dashboard"}
+        with contextlib.suppress(Exception):
+            self.event_bus.upsert_role_heartbeat(self.ui_heartbeat_role, payload)
+        return now
+
+    def should_run_background_rpc(self) -> bool:
+        if not self.cfg.auto_idle_pause:
+            self.ui_active_cached = True
+            self.stats["idle_paused"] = False
+            return True
+
+        now_monotonic = time.time()
+        if (now_monotonic - self.last_ui_check_at) >= 1.0:
+            latest = int(self.last_ui_heartbeat_ts)
+            hb = None
+            with contextlib.suppress(Exception):
+                hb = self.event_bus.get_role_heartbeat(self.ui_heartbeat_role)
+            if hb:
+                latest = max(latest, int(hb.get("updated_at", 0)))
+            self.last_ui_heartbeat_ts = latest
+            self.stats["ui_last_heartbeat_at"] = latest
+            timeout = max(5, int(self.cfg.ui_heartbeat_timeout_sec))
+            self.ui_active_cached = latest > 0 and ((int(now_monotonic) - latest) <= timeout)
+            self.last_ui_check_at = now_monotonic
+
+        self.stats["idle_paused"] = not self.ui_active_cached
+        return self.ui_active_cached
 
     async def launch_config_watch_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -2297,6 +2416,11 @@ class VirtualsBot:
     async def ws_loop(self) -> None:
         while not self.stop_event.is_set():
             try:
+                if not self.should_run_background_rpc():
+                    self.stats["ws_connected"] = False
+                    await asyncio.sleep(1)
+                    continue
+
                 launch_configs = self.get_launch_configs()
                 if not launch_configs:
                     await asyncio.sleep(2)
@@ -2348,6 +2472,9 @@ class VirtualsBot:
                             )
 
                         while not self.stop_event.is_set():
+                            if not self.should_run_background_rpc():
+                                self.stats["ws_connected"] = False
+                                break
                             if self.ws_reconnect_event.is_set():
                                 break
                             try:
@@ -2694,6 +2821,9 @@ class VirtualsBot:
 
         while not self.stop_event.is_set():
             try:
+                if not self.should_run_background_rpc():
+                    await asyncio.sleep(1)
+                    continue
                 if self.scan_lock.locked():
                     await asyncio.sleep(1)
                     continue
@@ -2720,14 +2850,16 @@ class VirtualsBot:
                 await asyncio.sleep(2)
 
     async def health_handler(self, request: web.Request) -> web.Response:
+        ui_active = self.should_run_background_rpc()
         p, _ = await self.price_service.get_price()
         stats = dict(self.stats)
         queue_size = int(self.queue.qsize())
         pending_tx = int(len(self.pending_txs))
         scan_jobs = int(len(self.scan_jobs))
+        now_ts = time.time()
 
         if self.role == "writer":
-            now = int(time.time())
+            now = int(now_ts)
             queue_size = self.event_bus.queue_size()
             scan_jobs = self.event_bus.count_scan_jobs(only_active=True)
 
@@ -2759,6 +2891,26 @@ class VirtualsBot:
                 "scanJobs": scan_jobs,
                 "backfillRpcMode": "separate" if self.backfill_rpc_separate else "shared",
                 "role": self.role,
+                "server_now": int(now_ts),
+                "server_now_ms": int(now_ts * 1000),
+                "autoIdlePause": bool(self.cfg.auto_idle_pause),
+                "idleTimeoutSec": int(self.cfg.ui_heartbeat_timeout_sec),
+                "idlePaused": not ui_active,
+                "uiLastHeartbeatAt": int(self.last_ui_heartbeat_ts),
+            }
+        )
+
+    async def heartbeat_handler(self, request: web.Request) -> web.Response:
+        now = self.touch_ui_heartbeat()
+        ui_active = self.should_run_background_rpc()
+        return web.json_response(
+            {
+                "ok": True,
+                "server_now": now,
+                "autoIdlePause": bool(self.cfg.auto_idle_pause),
+                "idleTimeoutSec": int(self.cfg.ui_heartbeat_timeout_sec),
+                "idlePaused": not ui_active,
+                "uiLastHeartbeatAt": int(self.last_ui_heartbeat_ts),
             }
         )
 
@@ -2969,9 +3121,24 @@ class VirtualsBot:
             name = str(payload.get("name", "")).strip()
             if not name:
                 raise ValueError("name cannot be empty")
-            internal_pool_addr = normalize_address(str(payload.get("internal_pool_addr", "")).strip())
+            internal_pool_val = payload.get("internal_pool_addr", "")
+            internal_pool_raw = "" if internal_pool_val is None else str(internal_pool_val).strip()
+            internal_pool_addr = normalize_address(internal_pool_raw) if internal_pool_raw else ""
+            save_as_draft = bool(payload.get("save_as_draft", False))
             is_enabled = bool(payload.get("is_enabled", True))
             switch_only = bool(payload.get("switch_only", False))
+            start_ts_raw = payload.get("start_ts")
+            start_ts: Optional[int]
+            if start_ts_raw is None or str(start_ts_raw).strip() == "":
+                start_ts = None
+            else:
+                start_ts = int(start_ts_raw)
+                if start_ts <= 0:
+                    raise ValueError("start_ts must be positive unix seconds")
+            if save_as_draft:
+                is_enabled = False
+            elif not internal_pool_addr:
+                raise ValueError("internal_pool_addr is required for active project")
 
             self.storage.upsert_launch_config(
                 name=name,
@@ -2980,6 +3147,7 @@ class VirtualsBot:
                 tax_addr=self.fixed_tax_addr,
                 token_total_supply=self.fixed_token_total_supply,
                 fee_rate=self.fixed_fee_rate,
+                start_ts=start_ts,
                 is_enabled=is_enabled,
             )
             if switch_only:
@@ -3150,6 +3318,8 @@ class VirtualsBot:
         app.router.add_post("/scan-range", self.scan_range_handler)
         app.router.add_get("/scan-jobs/{job_id}", self.scan_job_detail_handler)
         app.router.add_post("/scan-jobs/{job_id}/cancel", self.scan_job_cancel_handler)
+        app.router.add_post("/heartbeat", self.heartbeat_handler)
+        app.router.add_get("/heartbeat", self.heartbeat_handler)
         app.router.add_get("/health", self.health_handler)
         app.router.add_get("/mywallets", self.wallets_handler)
         app.router.add_get("/mywallets/{addr}", self.wallet_detail_handler)
@@ -3240,7 +3410,7 @@ async def main_async(config_path: str, role: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="V-Pulse monitor v3.1.0 split-role runtime")
+    parser = argparse.ArgumentParser(description="V-Pulse monitor v4.0.0 split-role runtime")
     parser.add_argument(
         "--config",
         default="./config.json",
