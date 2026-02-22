@@ -506,6 +506,114 @@
       text-align: center;
     }
 
+    #leaderTable th:nth-child(7),
+    #leaderTable td:nth-child(7) {
+      text-align: center;
+    }
+
+    #leaderTable tr.leader-sell-hit td {
+      background: rgba(242, 201, 76, 0.08);
+    }
+
+    #leaderTable tr.leader-sell-hit:hover td {
+      background: rgba(242, 201, 76, 0.12);
+    }
+
+    #leaderTable tr.leader-detail-row td {
+      height: auto;
+      padding: 10px 12px 12px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .sell-flag {
+      display: inline-flex;
+      margin-left: 8px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(242, 201, 76, 0.48);
+      color: #ffe7a6;
+      background: rgba(242, 201, 76, 0.14);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .leader-detail-wrap {
+      border: 1px solid var(--divider);
+      border-radius: var(--r-ctl);
+      background: rgba(255, 255, 255, 0.02);
+      overflow: hidden;
+    }
+
+    .leader-detail-wrap table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .leader-detail-wrap th,
+    .leader-detail-wrap td {
+      height: 36px;
+      padding: 0 10px;
+      border-bottom: 1px solid var(--divider);
+      white-space: nowrap;
+    }
+
+    .leader-detail-wrap th {
+      position: static;
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-2);
+      font-weight: 500;
+    }
+
+    .leader-detail-wrap tr:last-child td {
+      border-bottom: none;
+    }
+
+    .leader-detail-wrap th:nth-child(2),
+    .leader-detail-wrap th:nth-child(3),
+    .leader-detail-wrap td:nth-child(2),
+    .leader-detail-wrap td:nth-child(3) {
+      text-align: right;
+    }
+
+    .leader-detail-status {
+      padding: 10px 12px;
+      font-size: 12px;
+      color: var(--text-2);
+      font-family: var(--sans);
+    }
+
+    .leader-detail-note {
+      padding: 8px 12px 10px;
+      border-top: 1px solid var(--divider);
+      font-size: 11px;
+      font-family: var(--sans);
+    }
+
+    .leader-expand-btn {
+      height: 30px;
+      min-width: 82px;
+      padding: 0 12px;
+      font-size: 11px;
+      font-weight: 540;
+      border-radius: 999px;
+      background: rgba(76, 201, 240, 0.1);
+      border-color: rgba(76, 201, 240, 0.36);
+      color: #d9f5ff;
+    }
+
+    .leader-expand-btn:hover {
+      background: rgba(76, 201, 240, 0.16);
+      border-color: rgba(76, 201, 240, 0.52);
+      color: #effbff;
+    }
+
+    .leader-expand-btn.is-open {
+      background: rgba(242, 201, 76, 0.15);
+      border-color: rgba(242, 201, 76, 0.45);
+      color: #ffe8ab;
+    }
+
     .enable-switch {
       position: relative;
       display: inline-block;
@@ -806,6 +914,7 @@
               <th>累计买入代币(万)</th>
               <th>FDV_USD(万)</th>
               <th>最近交易时间</th>
+              <th>卖出明细</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -945,6 +1054,12 @@
     const perfDisplayState = {};
     const delayPerfStateByProject = new Map();
     const SEEN_TX_CAP = 10000;
+    const LEADER_SELL_DETAIL_LIMIT = 120;
+    const leaderExpandedKeys = new Set();
+    const leaderSellDetailsCache = new Map();
+    const leaderSellInflight = new Map();
+    let leaderRowsLatest = [];
+    let leaderProjectLatest = "";
 
     const toNum = (v) => {
       const n = Number(v);
@@ -1192,6 +1307,13 @@
       return String(v ?? "")
         .replaceAll("&", "&amp;")
         .replaceAll("\"", "&quot;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function escText(v) {
+      return String(v ?? "")
+        .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;");
     }
@@ -2187,23 +2309,178 @@
       }
     }
 
-    function renderLeaderTable(rows) {
+    function leaderDetailKey(project, buyer) {
+      return `${String(project || "").trim()}|${String(buyer || "").trim().toLowerCase()}`;
+    }
+
+    async function loadLeaderSellTrades(project, buyer, limit = LEADER_SELL_DETAIL_LIMIT) {
+      const p = String(project || "").trim();
+      const b = String(buyer || "").trim().toLowerCase();
+      if (!p || !b) {
+        return { status: "error", items: [], error: "缺少项目或地址" };
+      }
+      const key = leaderDetailKey(p, b);
+      const cached = leaderSellDetailsCache.get(key);
+      if (cached && cached.status === "ready") {
+        return cached;
+      }
+      const inflight = leaderSellInflight.get(key);
+      if (inflight) {
+        return await inflight;
+      }
+
+      leaderSellDetailsCache.set(key, { status: "loading", items: [], error: "" });
+      const safeLimit = Math.max(1, Math.min(300, Number(limit) || LEADER_SELL_DETAIL_LIMIT));
+      const task = (async () => {
+        try {
+          const data = await jget(
+            `/leaderboard-sells?project=${encodeURIComponent(p)}&buyer=${encodeURIComponent(b)}&limit=${safeLimit}`
+          );
+          const items = Array.isArray(data?.items) ? data.items : [];
+          const payload = { status: "ready", items, error: "" };
+          leaderSellDetailsCache.set(key, payload);
+          return payload;
+        } catch (e) {
+          const payload = { status: "error", items: [], error: String(e.message || e) };
+          leaderSellDetailsCache.set(key, payload);
+          return payload;
+        } finally {
+          leaderSellInflight.delete(key);
+        }
+      })();
+      leaderSellInflight.set(key, task);
+      return await task;
+    }
+
+    function buildLeaderSellDetailHtml(project, buyer, sellCount = 0) {
+      const key = leaderDetailKey(project, buyer);
+      const cached = leaderSellDetailsCache.get(key);
+      if (!cached || cached.status === "loading") {
+        return `<div class="leader-detail-wrap"><div class="leader-detail-status">卖出明细加载中...</div></div>`;
+      }
+      if (cached.status === "error") {
+        return `<div class="leader-detail-wrap"><div class="leader-detail-status">卖出明细加载失败：${escText(cached.error || "未知错误")}</div></div>`;
+      }
+      const items = Array.isArray(cached.items) ? cached.items : [];
+      if (!items.length) {
+        return `<div class="leader-detail-wrap"><div class="leader-detail-status muted">暂无卖出明细。</div></div>`;
+      }
+
+      const rowsHtml = items.map((x) => `
+        <tr>
+          <td>${hashWithCopyHtml(x.tx_hash)}</td>
+          <td>${numWithExactTitle(fmtWanFixed(x.token_sold, 2), x.token_sold)}</td>
+          <td>${numWithExactTitle(fmtNum(x.recovered_v, 2), x.recovered_v)}</td>
+          <td>${fmtTs(x.block_timestamp)}</td>
+        </tr>
+      `).join("");
+
+      const note = Number(sellCount) > items.length
+        ? `仅显示最近 ${items.length} 笔，累计卖出笔数：${fmtNum(sellCount, 0)}`
+        : `累计卖出笔数：${fmtNum(items.length, 0)}`;
+
+      return `
+        <div class="leader-detail-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>交易哈希</th>
+                <th>卖出代币(万)</th>
+                <th>卖出回收V</th>
+                <th>卖出时间</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+          <div class="leader-detail-note muted">${note}</div>
+        </div>
+      `;
+    }
+
+    function renderLeaderTable(rows, projectName = "") {
+      const project = String(projectName || projectSelect.value || "").trim();
+      leaderRowsLatest = Array.isArray(rows) ? rows : [];
+      leaderProjectLatest = project;
       leaderBody.innerHTML = "";
-      rows.forEach((r, idx) => {
+      const validKeys = new Set();
+
+      leaderRowsLatest.forEach((r, idx) => {
+        const buyerRaw = String(r.buyer || "").trim();
+        const buyerNorm = buyerRaw.toLowerCase();
+        const key = leaderDetailKey(project, buyerNorm || `row_${idx}`);
+        validKeys.add(key);
+
+        const rankLabel = String(r.rank_label || r.rank || idx + 1);
+        const sellCount = Math.max(0, Number(r.sell_count || 0));
+        const pinned = Number(r.pinned_by_top20_sell || 0) > 0;
+        const hasSell = sellCount > 0;
+        const isExpanded = hasSell && leaderExpandedKeys.has(key);
+
+        const cached = leaderSellDetailsCache.get(key);
+        if (
+          hasSell &&
+          cached &&
+          cached.status === "ready" &&
+          Array.isArray(cached.items) &&
+          cached.items.length < sellCount
+        ) {
+          leaderSellDetailsCache.delete(key);
+        }
+
+        const latestTxTime = Number(r.last_tx_time) || 0;
+        const latestSellTime = Number(r.last_sell_time) || 0;
+        const latestTime = Math.max(latestTxTime, latestSellTime);
+
         const tr = document.createElement("tr");
+        if (hasSell || pinned) {
+          tr.classList.add("leader-sell-hit");
+        }
+        const flagHtml = (hasSell || pinned)
+          ? `<span class="sell-flag">${pinned ? "在榜卖出已跟踪" : "含卖出"}</span>`
+          : "";
+        const actionHtml = hasSell
+          ? `<button class="pill leader-expand-btn ${isExpanded ? "is-open" : ""}" type="button" data-project="${escAttr(project)}" data-buyer="${escAttr(buyerNorm)}">${isExpanded ? "收起" : "展开"}(${fmtNum(sellCount, 0)})</button>`
+          : "-";
+
         tr.innerHTML = `
-          <td>${idx + 1}</td>
-          <td>${addrWithCopyHtml(r.buyer)}</td>
+          <td>${escText(rankLabel)}</td>
+          <td>${addrWithCopyHtml(buyerRaw)}${flagHtml}</td>
           <td>${numWithExactTitle(fmtNum(r.sum_spent_v_est, 0), r.sum_spent_v_est)}</td>
           <td>${numWithExactTitle(fmtWanFixed(r.sum_token_bought, 2), r.sum_token_bought)}</td>
           <td>${numWithExactTitle(fmtWanFixed(r.breakeven_fdv_usd, 2), r.breakeven_fdv_usd)}</td>
-          <td>${fmtTs(r.last_tx_time)}</td>
+          <td>${fmtTs(latestTime)}</td>
+          <td>${actionHtml}</td>
         `;
         leaderBody.appendChild(tr);
+
+        if (isExpanded && hasSell) {
+          const detailTr = document.createElement("tr");
+          detailTr.className = "leader-detail-row";
+          detailTr.innerHTML = `<td colspan="7">${buildLeaderSellDetailHtml(project, buyerNorm, sellCount)}</td>`;
+          leaderBody.appendChild(detailTr);
+
+          const detailCache = leaderSellDetailsCache.get(key);
+          if (!detailCache || detailCache.status === "loading") {
+            loadLeaderSellTrades(project, buyerNorm).then(() => {
+              if (leaderExpandedKeys.has(key) && leaderProjectLatest === project) {
+                renderLeaderTable(leaderRowsLatest, leaderProjectLatest);
+              }
+            }).catch(() => {
+              // loadLeaderSellTrades already stores error state.
+            });
+          }
+        }
       });
-      if (!rows.length) {
+
+      for (const key of Array.from(leaderExpandedKeys)) {
+        if (!validKeys.has(key)) {
+          leaderExpandedKeys.delete(key);
+        }
+      }
+
+      if (!leaderRowsLatest.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="6" class="muted">暂无大户榜数据。</td>`;
+        tr.innerHTML = `<td colspan="7" class="muted">暂无大户榜数据。</td>`;
         leaderBody.appendChild(tr);
       }
     }
@@ -2285,7 +2562,7 @@
       minuteMeta.textContent = `项目=${project || "-"} | 点数=${minuteRows.length} | 从=${fmtTs(from)} | 到=${fmtTs(to)}`;
 
       renderWalletTable(wallets.items || []);
-      renderLeaderTable(leader.items || []);
+      renderLeaderTable(leader.items || [], project);
       renderTxDelayTable(txDelays.items || [], project);
     }
 
@@ -2378,6 +2655,40 @@
     }
 
     document.addEventListener("click", async (ev) => {
+      const expandBtn = ev.target.closest(".leader-expand-btn");
+      if (expandBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const project = String(
+          expandBtn.getAttribute("data-project") || leaderProjectLatest || projectSelect.value || ""
+        ).trim();
+        const buyer = String(expandBtn.getAttribute("data-buyer") || "").trim().toLowerCase();
+        if (!project || !buyer) {
+          return;
+        }
+        const key = leaderDetailKey(project, buyer);
+        if (leaderExpandedKeys.has(key)) {
+          leaderExpandedKeys.delete(key);
+          renderLeaderTable(leaderRowsLatest, leaderProjectLatest || project);
+          return;
+        }
+
+        const cached = leaderSellDetailsCache.get(key);
+        if (cached && cached.status === "error") {
+          leaderSellDetailsCache.delete(key);
+        }
+        leaderExpandedKeys.add(key);
+        renderLeaderTable(leaderRowsLatest, leaderProjectLatest || project);
+        const latest = leaderSellDetailsCache.get(key);
+        if (!latest || latest.status !== "ready") {
+          await loadLeaderSellTrades(project, buyer);
+          if (leaderExpandedKeys.has(key)) {
+            renderLeaderTable(leaderRowsLatest, leaderProjectLatest || project);
+          }
+        }
+        return;
+      }
+
       const recalcBtn = ev.target.closest(".wallet-recalc-btn");
       if (recalcBtn) {
         ev.preventDefault();

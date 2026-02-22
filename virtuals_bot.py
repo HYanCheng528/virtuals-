@@ -83,8 +83,10 @@ def raw_to_decimal(value: int, decimals: int) -> Decimal:
 
 EVENT_DECIMAL_FIELDS = {
     "token_bought",
+    "token_sold",
     "fee_v",
     "tax_v",
+    "recovered_v",
     "spent_v_est",
     "spent_v_actual",
     "cost_v",
@@ -162,6 +164,16 @@ class AppConfig:
     max_rpc_retries: int
     backfill_chunk_blocks: int
     backfill_interval_sec: int
+    priority_write_enabled: bool
+    priority_write_realtime_quota: int
+    priority_write_backfill_quota: int
+    backfill_throttle_enabled: bool
+    backfill_rt_pending_high: int
+    backfill_rt_pending_low: int
+    backfill_rt_queue_high: int
+    backfill_rt_queue_low: int
+    backfill_throttle_chunk_blocks: int
+    backfill_throttle_interval_sec: int
     log_level: str
     jsonl_path: str
     event_bus_sqlite_path: str
@@ -239,6 +251,53 @@ def load_config(path: str) -> AppConfig:
     if receipt_workers_backfill <= 0:
         raise ValueError("RECEIPT_WORKERS_BACKFILL must be >= 1")
 
+    priority_write_enabled = parse_bool(raw.get("PRIORITY_WRITE_ENABLED"), True)
+    priority_write_realtime_quota = max(
+        1, int(raw.get("PRIORITY_WRITE_REALTIME_QUOTA", 8))
+    )
+    priority_write_backfill_quota = max(
+        1, int(raw.get("PRIORITY_WRITE_BACKFILL_QUOTA", 2))
+    )
+
+    backfill_chunk_blocks = max(1, int(raw.get("BACKFILL_CHUNK_BLOCKS", 20)))
+    backfill_interval_sec = max(1, int(raw.get("BACKFILL_INTERVAL_SEC", 8)))
+
+    backfill_throttle_enabled = parse_bool(raw.get("BACKFILL_THROTTLE_ENABLED"), True)
+    backfill_rt_pending_high = max(
+        1, int(raw.get("BACKFILL_RT_PENDING_HIGH", 200))
+    )
+    backfill_rt_pending_low = max(
+        0, int(raw.get("BACKFILL_RT_PENDING_LOW", max(1, backfill_rt_pending_high // 3)))
+    )
+    if backfill_rt_pending_low >= backfill_rt_pending_high:
+        backfill_rt_pending_low = max(0, backfill_rt_pending_high - 1)
+
+    backfill_rt_queue_high = max(1, int(raw.get("BACKFILL_RT_QUEUE_HIGH", 400)))
+    backfill_rt_queue_low = max(
+        0, int(raw.get("BACKFILL_RT_QUEUE_LOW", max(1, backfill_rt_queue_high // 3)))
+    )
+    if backfill_rt_queue_low >= backfill_rt_queue_high:
+        backfill_rt_queue_low = max(0, backfill_rt_queue_high - 1)
+
+    backfill_throttle_chunk_blocks = max(
+        1,
+        int(
+            raw.get(
+                "BACKFILL_THROTTLE_CHUNK_BLOCKS",
+                max(1, backfill_chunk_blocks // 2),
+            )
+        ),
+    )
+    backfill_throttle_interval_sec = max(
+        1,
+        int(
+            raw.get(
+                "BACKFILL_THROTTLE_INTERVAL_SEC",
+                backfill_interval_sec + 2,
+            )
+        ),
+    )
+
     return AppConfig(
         chain_id=chain_id,
         ws_rpc_url=ws_rpc_url,
@@ -263,8 +322,18 @@ def load_config(path: str) -> AppConfig:
         receipt_workers_realtime=receipt_workers_realtime,
         receipt_workers_backfill=receipt_workers_backfill,
         max_rpc_retries=int(raw.get("MAX_RPC_RETRIES", 5)),
-        backfill_chunk_blocks=int(raw.get("BACKFILL_CHUNK_BLOCKS", 20)),
-        backfill_interval_sec=int(raw.get("BACKFILL_INTERVAL_SEC", 8)),
+        backfill_chunk_blocks=backfill_chunk_blocks,
+        backfill_interval_sec=backfill_interval_sec,
+        priority_write_enabled=priority_write_enabled,
+        priority_write_realtime_quota=priority_write_realtime_quota,
+        priority_write_backfill_quota=priority_write_backfill_quota,
+        backfill_throttle_enabled=backfill_throttle_enabled,
+        backfill_rt_pending_high=backfill_rt_pending_high,
+        backfill_rt_pending_low=backfill_rt_pending_low,
+        backfill_rt_queue_high=backfill_rt_queue_high,
+        backfill_rt_queue_low=backfill_rt_queue_low,
+        backfill_throttle_chunk_blocks=backfill_throttle_chunk_blocks,
+        backfill_throttle_interval_sec=backfill_throttle_interval_sec,
         log_level=str(raw.get("LOG_LEVEL", "info")).lower(),
         jsonl_path=str(raw.get("JSONL_PATH", "./data/events.jsonl")),
         event_bus_sqlite_path=str(raw.get("EVENT_BUS_SQLITE_PATH", "./data/virtuals_bus.db")),
@@ -528,6 +597,34 @@ class Storage:
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY(project, buyer)
             );
+
+            CREATE TABLE IF NOT EXISTS leaderboard_sell_stats (
+                project TEXT NOT NULL,
+                buyer TEXT NOT NULL,
+                sum_token_sold TEXT NOT NULL,
+                sum_recovered_v TEXT NOT NULL,
+                sell_count INTEGER NOT NULL,
+                last_sell_time INTEGER NOT NULL,
+                pinned_by_top20_sell INTEGER NOT NULL DEFAULT 0,
+                pinned_at INTEGER,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(project, buyer)
+            );
+
+            CREATE TABLE IF NOT EXISTS leaderboard_sell_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                buyer TEXT NOT NULL,
+                tx_hash TEXT NOT NULL,
+                token_addr TEXT NOT NULL,
+                token_sold TEXT NOT NULL,
+                recovered_v TEXT NOT NULL,
+                block_timestamp INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(project, buyer, tx_hash, token_addr)
+            );
+            CREATE INDEX IF NOT EXISTS idx_leaderboard_sell_trades_project_buyer_time
+                ON leaderboard_sell_trades(project, buyer, block_timestamp DESC, id DESC);
 
             CREATE TABLE IF NOT EXISTS project_stats (
                 project TEXT PRIMARY KEY,
@@ -960,12 +1057,57 @@ class Storage:
         minute_deltas: Dict[Tuple[str, int], Dict[str, Any]] = {}
         minute_buyers: Set[Tuple[str, int, str]] = set()
         leaderboard_deltas: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        sell_stats_deltas: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        sell_trade_deltas: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
         project_tax_deltas: Dict[str, Decimal] = {}
 
         cur = self.conn.cursor()
         cur.execute("BEGIN")
         try:
             for e in events:
+                event_kind = str(e.get("event_kind") or "buy").strip().lower()
+                if event_kind == "sell":
+                    project = str(e.get("project") or "").strip()
+                    buyer = str(e.get("buyer") or "").strip().lower()
+                    token_addr = str(e.get("token_addr") or "").strip().lower()
+                    tx_hash = str(e.get("tx_hash") or "").strip().lower()
+                    if not project or not buyer or not token_addr or not tx_hash:
+                        continue
+                    token_sold = Decimal(str(e.get("token_sold") or "0"))
+                    recovered_v = Decimal(str(e.get("recovered_v") or "0"))
+                    block_ts = int(e.get("block_timestamp") or 0)
+                    if token_sold <= 0 or recovered_v <= 0 or block_ts <= 0:
+                        continue
+
+                    skey = (project, buyer)
+                    sd = sell_stats_deltas.setdefault(
+                        skey,
+                        {
+                            "token_sold": Decimal(0),
+                            "recovered_v": Decimal(0),
+                            "sell_count": 0,
+                            "last_sell_time": 0,
+                        },
+                    )
+                    sd["token_sold"] += token_sold
+                    sd["recovered_v"] += recovered_v
+                    sd["sell_count"] += 1
+                    sd["last_sell_time"] = max(int(sd["last_sell_time"]), block_ts)
+
+                    tkey = (project, buyer, tx_hash, token_addr)
+                    td = sell_trade_deltas.setdefault(
+                        tkey,
+                        {
+                            "token_sold": Decimal(0),
+                            "recovered_v": Decimal(0),
+                            "block_timestamp": block_ts,
+                        },
+                    )
+                    td["token_sold"] += token_sold
+                    td["recovered_v"] += recovered_v
+                    td["block_timestamp"] = max(int(td["block_timestamp"]), block_ts)
+                    continue
+
                 cur.execute(
                     """
                     INSERT OR IGNORE INTO events(
@@ -1171,6 +1313,105 @@ class Storage:
                     ),
                 )
 
+            if sell_trade_deltas:
+                now = int(time.time())
+                cur.executemany(
+                    """
+                    INSERT OR IGNORE INTO leaderboard_sell_trades(
+                        project, buyer, tx_hash, token_addr, token_sold, recovered_v, block_timestamp, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            project,
+                            buyer,
+                            tx_hash,
+                            token_addr,
+                            decimal_to_str(d["token_sold"], 18),
+                            decimal_to_str(d["recovered_v"], 18),
+                            int(d["block_timestamp"]),
+                            now,
+                        )
+                        for (project, buyer, tx_hash, token_addr), d in sell_trade_deltas.items()
+                    ],
+                )
+
+            top20_cache: Dict[str, Set[str]] = {}
+
+            def _get_top20_buyers(project_name: str) -> Set[str]:
+                cached = top20_cache.get(project_name)
+                if cached is not None:
+                    return cached
+                rows = cur.execute(
+                    """
+                    SELECT buyer
+                    FROM leaderboard
+                    WHERE project = ?
+                    ORDER BY CAST(sum_token_bought AS REAL) DESC, CAST(sum_spent_v_est AS REAL) DESC
+                    LIMIT 20
+                    """,
+                    (project_name,),
+                ).fetchall()
+                buyers = {str(x["buyer"]).lower() for x in rows if x["buyer"]}
+                top20_cache[project_name] = buyers
+                return buyers
+
+            for (project, buyer), d in sell_stats_deltas.items():
+                row = cur.execute(
+                    """
+                    SELECT
+                        sum_token_sold,
+                        sum_recovered_v,
+                        sell_count,
+                        last_sell_time,
+                        pinned_by_top20_sell,
+                        pinned_at
+                    FROM leaderboard_sell_stats
+                    WHERE project = ? AND buyer = ?
+                    """,
+                    (project, buyer),
+                ).fetchone()
+                old_token_sold = Decimal(str(row["sum_token_sold"])) if row else Decimal(0)
+                old_recovered_v = Decimal(str(row["sum_recovered_v"])) if row else Decimal(0)
+                old_sell_count = int(row["sell_count"]) if row else 0
+                old_last_sell_time = int(row["last_sell_time"]) if row else 0
+                old_pinned = int(row["pinned_by_top20_sell"]) if row else 0
+                old_pinned_at = int(row["pinned_at"]) if row and row["pinned_at"] is not None else None
+
+                is_top20_now = buyer in _get_top20_buyers(project)
+                new_pinned = 1 if (old_pinned == 1 or is_top20_now) else 0
+                pin_ts = old_pinned_at
+                if new_pinned == 1 and pin_ts is None:
+                    pin_ts = int(time.time())
+
+                cur.execute(
+                    """
+                    INSERT INTO leaderboard_sell_stats(
+                        project, buyer, sum_token_sold, sum_recovered_v, sell_count,
+                        last_sell_time, pinned_by_top20_sell, pinned_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(project, buyer) DO UPDATE SET
+                        sum_token_sold = excluded.sum_token_sold,
+                        sum_recovered_v = excluded.sum_recovered_v,
+                        sell_count = excluded.sell_count,
+                        last_sell_time = excluded.last_sell_time,
+                        pinned_by_top20_sell = excluded.pinned_by_top20_sell,
+                        pinned_at = excluded.pinned_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        project,
+                        buyer,
+                        decimal_to_str(old_token_sold + d["token_sold"], 18),
+                        decimal_to_str(old_recovered_v + d["recovered_v"], 18),
+                        old_sell_count + int(d["sell_count"]),
+                        max(old_last_sell_time, int(d["last_sell_time"])),
+                        new_pinned,
+                        pin_ts,
+                        int(time.time()),
+                    ),
+                )
+
             for project, tax_delta in project_tax_deltas.items():
                 row = cur.execute(
                     """
@@ -1261,14 +1502,86 @@ class Storage:
         return [dict(r) for r in rows]
 
     def query_leaderboard(self, project: str, top_n: int) -> List[Dict[str, Any]]:
+        n = max(1, int(top_n))
         rows = self.conn.execute(
             """
-            SELECT * FROM leaderboard
-            WHERE project = ?
-            ORDER BY CAST(sum_token_bought AS REAL) DESC, CAST(sum_spent_v_est AS REAL) DESC
+            WITH ranked AS (
+                SELECT
+                    l.project,
+                    l.buyer,
+                    l.sum_spent_v_est,
+                    l.sum_token_bought,
+                    l.last_tx_time,
+                    ROW_NUMBER() OVER (
+                        ORDER BY
+                            CAST(l.sum_token_bought AS REAL) DESC,
+                            CAST(l.sum_spent_v_est AS REAL) DESC,
+                            l.buyer ASC
+                    ) AS rank_no
+                FROM leaderboard l
+                WHERE l.project = ?
+            ),
+            keepers AS (
+                SELECT buyer FROM ranked WHERE rank_no <= ?
+                UNION
+                SELECT buyer
+                FROM leaderboard_sell_stats
+                WHERE project = ? AND pinned_by_top20_sell = 1
+            )
+            SELECT
+                r.project,
+                r.buyer,
+                r.sum_spent_v_est,
+                r.sum_token_bought,
+                r.last_tx_time,
+                r.rank_no AS rank,
+                COALESCE(s.sum_token_sold, '0') AS sum_token_sold,
+                COALESCE(s.sum_recovered_v, '0') AS sum_recovered_v,
+                COALESCE(s.sell_count, 0) AS sell_count,
+                COALESCE(s.last_sell_time, 0) AS last_sell_time,
+                COALESCE(s.pinned_by_top20_sell, 0) AS pinned_by_top20_sell
+            FROM ranked r
+            JOIN keepers k ON k.buyer = r.buyer
+            LEFT JOIN leaderboard_sell_stats s
+                ON s.project = r.project AND s.buyer = r.buyer
+            ORDER BY r.rank_no ASC
+            """,
+            (project, n, project),
+        ).fetchall()
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            buy_token = Decimal(str(item.get("sum_token_bought") or "0"))
+            sold_token = Decimal(str(item.get("sum_token_sold") or "0"))
+            item["net_token_bought"] = decimal_to_str(buy_token - sold_token, 18)
+            rank_no = int(item.get("rank") or 0)
+            item["rank_label"] = str(rank_no) if rank_no <= n else f"{n}+"
+            items.append(item)
+        return items
+
+    def query_leaderboard_sell_trades(
+        self,
+        project: str,
+        buyer: str,
+        limit_n: int = 100,
+    ) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                project,
+                buyer,
+                tx_hash,
+                token_addr,
+                token_sold,
+                recovered_v,
+                block_timestamp,
+                created_at
+            FROM leaderboard_sell_trades
+            WHERE project = ? AND buyer = ?
+            ORDER BY block_timestamp DESC, id DESC
             LIMIT ?
             """,
-            (project, top_n),
+            (project, buyer, max(1, int(limit_n))),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1484,6 +1797,7 @@ class EventBusStorage:
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_event_queue_id ON event_queue(id);
+            CREATE INDEX IF NOT EXISTS idx_event_queue_source_id ON event_queue(source, id);
 
             CREATE TABLE IF NOT EXISTS role_heartbeats (
                 role TEXT PRIMARY KEY,
@@ -1566,6 +1880,9 @@ class EventBusStorage:
             """,
             (max(1, int(limit_n)),),
         ).fetchall()
+        return self._rows_to_events(rows)
+
+    def _rows_to_events(self, rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
         for row in rows:
             payload = json.loads(str(row["payload"]))
@@ -1578,6 +1895,63 @@ class EventBusStorage:
             )
         return result
 
+    def _build_exclude_clause(self, exclude_ids: Optional[List[int]]) -> Tuple[str, List[int]]:
+        if not exclude_ids:
+            return "", []
+        unique_ids = sorted({int(x) for x in exclude_ids if int(x) > 0})
+        if not unique_ids:
+            return "", []
+        placeholders = ",".join("?" for _ in unique_ids)
+        return f" AND id NOT IN ({placeholders})", unique_ids
+
+    def fetch_events_by_source(
+        self,
+        source: str,
+        limit_n: int,
+        exclude_ids: Optional[List[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        src = str(source or "").strip()
+        if not src:
+            return []
+        exclude_clause, exclude_params = self._build_exclude_clause(exclude_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT id, payload, block_number
+            FROM event_queue
+            WHERE source = ?{exclude_clause}
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (src, *exclude_params, max(1, int(limit_n))),
+        ).fetchall()
+        return self._rows_to_events(rows)
+
+    def fetch_events_excluding(
+        self,
+        limit_n: int,
+        exclude_ids: Optional[List[int]] = None,
+        excluded_sources: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        source_list = [str(x).strip() for x in (excluded_sources or []) if str(x).strip()]
+        exclude_clause, exclude_params = self._build_exclude_clause(exclude_ids)
+        source_clause = ""
+        source_params: List[Any] = []
+        if source_list:
+            placeholders = ",".join("?" for _ in source_list)
+            source_clause = f" AND source NOT IN ({placeholders})"
+            source_params = source_list
+        rows = self.conn.execute(
+            f"""
+            SELECT id, payload, block_number
+            FROM event_queue
+            WHERE 1=1{exclude_clause}{source_clause}
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (*exclude_params, *source_params, max(1, int(limit_n))),
+        ).fetchall()
+        return self._rows_to_events(rows)
+
     def ack_events(self, ids: List[int]) -> None:
         if not ids:
             return
@@ -1589,8 +1963,15 @@ class EventBusStorage:
         )
         self.conn.commit()
 
-    def queue_size(self) -> int:
-        row = self.conn.execute("SELECT COUNT(1) AS c FROM event_queue").fetchone()
+    def queue_size(self, source: Optional[str] = None) -> int:
+        src = str(source or "").strip()
+        if src:
+            row = self.conn.execute(
+                "SELECT COUNT(1) AS c FROM event_queue WHERE source = ?",
+                (src,),
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(1) AS c FROM event_queue").fetchone()
         return int(row["c"]) if row else 0
 
     def upsert_role_heartbeat(self, role: str, payload: Dict[str, Any]) -> None:
@@ -1879,6 +2260,10 @@ class VirtualsBot:
         self.block_ts_cache: Dict[int, int] = {}
         self.scan_jobs: Dict[str, Dict[str, Any]] = {}
         self.scan_lock = asyncio.Lock()
+        self.writer_rt_tokens = 0
+        self.writer_bf_tokens = 0
+        self.backfill_throttle_active = False
+        self.backfill_throttle_last_change = 0
         self.stats: Dict[str, Any] = {
             "ws_connected": False,
             "enqueued_txs": 0,
@@ -1892,6 +2277,9 @@ class VirtualsBot:
             "last_flush_at": 0,
             "idle_paused": False,
             "ui_last_heartbeat_at": 0,
+            "backfill_throttled": False,
+            "realtime_pending_txs": 0,
+            "realtime_queue_size": 0,
             "started_at": int(time.time()),
             "role": role,
         }
@@ -2057,8 +2445,126 @@ class VirtualsBot:
             "last_backfill_block": int(self.stats.get("last_backfill_block", 0)),
             "queue_size": int(self.queue.qsize()),
             "pending_txs": int(len(self.pending_txs)),
+            "backfill_throttled": bool(self.stats.get("backfill_throttled", False)),
+            "realtime_pending_txs": int(self.stats.get("realtime_pending_txs", 0)),
+            "realtime_queue_size": int(self.stats.get("realtime_queue_size", 0)),
             "updated_at": int(time.time()),
         }
+
+    def _next_writer_source(self) -> str:
+        rt_quota = max(1, int(self.cfg.priority_write_realtime_quota))
+        bf_quota = max(1, int(self.cfg.priority_write_backfill_quota))
+        if self.writer_rt_tokens <= 0 and self.writer_bf_tokens <= 0:
+            self.writer_rt_tokens = rt_quota
+            self.writer_bf_tokens = bf_quota
+        if self.writer_rt_tokens > 0:
+            self.writer_rt_tokens -= 1
+            return "realtime"
+        if self.writer_bf_tokens > 0:
+            self.writer_bf_tokens -= 1
+            return "backfill"
+        self.writer_rt_tokens = max(0, rt_quota - 1)
+        self.writer_bf_tokens = bf_quota
+        return "realtime"
+
+    def _build_writer_source_needs(self, batch_size: int) -> Dict[str, int]:
+        if batch_size <= 0:
+            return {"realtime": 0, "backfill": 0}
+        if not self.cfg.priority_write_enabled:
+            return {"realtime": batch_size, "backfill": 0}
+        needs = {"realtime": 0, "backfill": 0}
+        for _ in range(batch_size):
+            src = self._next_writer_source()
+            needs[src] = needs.get(src, 0) + 1
+        return needs
+
+    def _fetch_writer_rows(self, batch_size: int) -> List[Dict[str, Any]]:
+        if batch_size <= 0:
+            return []
+        if not self.cfg.priority_write_enabled:
+            return self.event_bus.fetch_events(batch_size)
+
+        needs = self._build_writer_source_needs(batch_size)
+        rows: List[Dict[str, Any]] = []
+        picked_ids: List[int] = []
+
+        rt_need = int(needs.get("realtime", 0))
+        if rt_need > 0:
+            rt_rows = self.event_bus.fetch_events_by_source(
+                "realtime",
+                rt_need,
+                exclude_ids=picked_ids,
+            )
+            rows.extend(rt_rows)
+            picked_ids.extend(int(x["id"]) for x in rt_rows)
+
+        bf_need = int(needs.get("backfill", 0))
+        if bf_need > 0:
+            bf_rows = self.event_bus.fetch_events_by_source(
+                "backfill",
+                bf_need,
+                exclude_ids=picked_ids,
+            )
+            rows.extend(bf_rows)
+            picked_ids.extend(int(x["id"]) for x in bf_rows)
+
+        remaining = batch_size - len(rows)
+        if remaining > 0:
+            extra_rows = self.event_bus.fetch_events_excluding(
+                remaining,
+                exclude_ids=picked_ids,
+            )
+            rows.extend(extra_rows)
+
+        return rows
+
+    def get_realtime_pressure(self) -> Tuple[int, int, bool]:
+        heartbeat = self.event_bus.get_role_heartbeat("realtime")
+        if not heartbeat:
+            self.stats["realtime_pending_txs"] = 0
+            self.stats["realtime_queue_size"] = 0
+            return 0, 0, False
+
+        now = int(time.time())
+        updated_at = int(heartbeat.get("updated_at", 0))
+        fresh = updated_at > 0 and (now - updated_at) <= 20
+        payload = heartbeat.get("payload", {}) if fresh else {}
+        pending_txs = int(payload.get("pending_txs", 0)) if payload else 0
+        queue_size = int(payload.get("queue_size", 0)) if payload else 0
+        self.stats["realtime_pending_txs"] = pending_txs
+        self.stats["realtime_queue_size"] = queue_size
+        return pending_txs, queue_size, fresh
+
+    def should_throttle_backfill(self) -> bool:
+        if not self.cfg.backfill_throttle_enabled:
+            self.backfill_throttle_active = False
+            self.stats["backfill_throttled"] = False
+            return False
+
+        pending_txs, queue_size, fresh = self.get_realtime_pressure()
+        if not fresh:
+            self.backfill_throttle_active = False
+            self.stats["backfill_throttled"] = False
+            return False
+
+        high_hit = (
+            pending_txs >= int(self.cfg.backfill_rt_pending_high)
+            or queue_size >= int(self.cfg.backfill_rt_queue_high)
+        )
+        low_hit = (
+            pending_txs <= int(self.cfg.backfill_rt_pending_low)
+            and queue_size <= int(self.cfg.backfill_rt_queue_low)
+        )
+
+        if not self.backfill_throttle_active and high_hit:
+            self.backfill_throttle_active = True
+            self.backfill_throttle_last_change = int(time.time())
+        elif self.backfill_throttle_active and low_hit:
+            self.backfill_throttle_active = False
+            self.backfill_throttle_last_change = int(time.time())
+
+        self.stats["backfill_throttled"] = bool(self.backfill_throttle_active)
+        return self.backfill_throttle_active
 
     async def role_heartbeat_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -2072,7 +2578,7 @@ class VirtualsBot:
         while not self.stop_event.is_set():
             batch_size = max(1, int(self.cfg.db_batch_size))
             idle_sleep = max(0.05, self.cfg.db_flush_ms / 1000.0)
-            rows = self.event_bus.fetch_events(batch_size)
+            rows = self._fetch_writer_rows(batch_size)
             if not rows:
                 await asyncio.sleep(idle_sleep)
                 continue
@@ -2207,6 +2713,10 @@ class VirtualsBot:
         token_received_raw: Dict[Tuple[str, str], int] = defaultdict(int)
         token_received_first_idx: Dict[Tuple[str, str], int] = {}
         token_outgoing_logs: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        token_incoming_logs: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        pool_sender_token_raw: Dict[Tuple[str, str], int] = defaultdict(int)
+        pool_sender_token_first_idx: Dict[Tuple[str, str], int] = {}
+        virtual_out_from_pool_raw: Dict[str, int] = defaultdict(int)
 
         vaddr = self.cfg.virtual_token_addr
         for lg in transfer_logs:
@@ -2218,6 +2728,7 @@ class VirtualsBot:
                 continue
 
             token_outgoing_logs[(from_addr, token)].append(lg)
+            token_incoming_logs[(to_addr, token)].append(lg)
 
             if token == vaddr:
                 if to_addr in {launch.fee_addr, launch.tax_addr, launch.internal_pool_addr}:
@@ -2228,12 +2739,19 @@ class VirtualsBot:
                     buyer_tax_raw[from_addr] += amount
                 buyer_virtual_out_raw[from_addr] += amount
                 buyer_virtual_in_raw[to_addr] += amount
+                if from_addr == launch.internal_pool_addr:
+                    virtual_out_from_pool_raw[to_addr] += amount
 
             if from_addr == launch.internal_pool_addr and amount > 0:
                 token_received_raw[(to_addr, token)] += amount
                 key = (to_addr, token)
                 if key not in token_received_first_idx:
                     token_received_first_idx[key] = int(lg["idx"])
+            elif to_addr == launch.internal_pool_addr and token != vaddr and amount > 0:
+                pkey = (from_addr, token)
+                pool_sender_token_raw[pkey] += amount
+                if pkey not in pool_sender_token_first_idx:
+                    pool_sender_token_first_idx[pkey] = int(lg["idx"])
 
         virtual_decimals = await self.get_token_decimals(vaddr, rpc=rpc)
 
@@ -2299,6 +2817,7 @@ class VirtualsBot:
 
             events.append(
                 {
+                    "event_kind": "buy",
                     "project": launch.name,
                     "tx_hash": tx_hash,
                     "block_number": block_number,
@@ -2321,6 +2840,72 @@ class VirtualsBot:
                     "is_my_wallet": effective_buyer in self.my_wallets,
                     "anomaly": anomaly,
                     "is_price_stale": is_price_stale,
+                }
+            )
+
+        sell_rows: Dict[Tuple[str, str], Dict[str, int]] = {}
+        for (pool_sender, token_addr), raw_amount in pool_sender_token_raw.items():
+            if raw_amount <= 0:
+                continue
+            recovered_raw = int(virtual_out_from_pool_raw.get(pool_sender, 0))
+            if recovered_raw <= 0:
+                continue
+
+            effective_seller = pool_sender
+            effective_raw_amount = int(raw_amount)
+            cur_idx = int(pool_sender_token_first_idx.get((pool_sender, token_addr), -1))
+            visited: Set[str] = {launch.internal_pool_addr}
+            for _ in range(8):
+                ins = [
+                    x
+                    for x in token_incoming_logs.get((effective_seller, token_addr), [])
+                    if int(x["idx"]) < cur_idx
+                    and x["from"] != launch.internal_pool_addr
+                    and int(x["amount_raw"]) > 0
+                ]
+                if not ins:
+                    break
+                prev = max(ins, key=lambda x: (int(x["amount_raw"]), int(x["idx"])))
+                prev_from = str(prev["from"])
+                if prev_from in visited:
+                    break
+                visited.add(prev_from)
+                effective_seller = prev_from
+                cur_idx = int(prev["idx"])
+                effective_raw_amount = min(effective_raw_amount, int(prev["amount_raw"]))
+
+            skey = (effective_seller, token_addr)
+            sd = sell_rows.setdefault(
+                skey,
+                {"token_sold_raw": 0, "recovered_v_raw": 0},
+            )
+            sd["token_sold_raw"] += int(effective_raw_amount)
+            sd["recovered_v_raw"] += recovered_raw
+
+        for (seller, token_addr), s in sell_rows.items():
+            token_sold_raw = int(s["token_sold_raw"])
+            recovered_v_raw = int(s["recovered_v_raw"])
+            if token_sold_raw <= 0 or recovered_v_raw <= 0:
+                continue
+            token_decimals = await self.get_token_decimals(token_addr, rpc=rpc)
+            token_sold = raw_to_decimal(token_sold_raw, token_decimals)
+            recovered_v = raw_to_decimal(recovered_v_raw, virtual_decimals)
+            if token_sold <= 0 or recovered_v <= 0:
+                continue
+
+            events.append(
+                {
+                    "event_kind": "sell",
+                    "project": launch.name,
+                    "tx_hash": tx_hash,
+                    "block_number": block_number,
+                    "block_timestamp": timestamp,
+                    "internal_pool": launch.internal_pool_addr,
+                    "buyer": seller,
+                    "token_addr": token_addr,
+                    "token_sold": token_sold,
+                    "recovered_v": recovered_v,
+                    "is_my_wallet": seller in self.my_wallets,
                 }
             )
         return events
@@ -2827,17 +3412,28 @@ class VirtualsBot:
                 if self.scan_lock.locked():
                     await asyncio.sleep(1)
                     continue
+                throttled = self.should_throttle_backfill()
+                scan_chunk = (
+                    max(1, int(self.cfg.backfill_throttle_chunk_blocks))
+                    if throttled
+                    else max(1, int(self.cfg.backfill_chunk_blocks))
+                )
+                scan_interval = (
+                    max(1, int(self.cfg.backfill_throttle_interval_sec))
+                    if throttled
+                    else max(1, int(self.cfg.backfill_interval_sec))
+                )
                 latest = await scan_rpc.get_latest_block_number()
                 target = max(0, latest - self.cfg.confirmations)
                 if cursor >= target:
-                    await asyncio.sleep(self.cfg.backfill_interval_sec)
+                    await asyncio.sleep(scan_interval)
                     continue
 
                 launch_configs = self.get_launch_configs()
                 if not launch_configs:
-                    await asyncio.sleep(self.cfg.backfill_interval_sec)
+                    await asyncio.sleep(scan_interval)
                     continue
-                to_block = min(target, cursor + self.cfg.backfill_chunk_blocks)
+                to_block = min(target, cursor + scan_chunk)
                 txs = await self.fetch_backfill_txhashes(
                     cursor + 1, to_block, launch_configs, rpc=scan_rpc
                 )
@@ -2846,6 +3442,8 @@ class VirtualsBot:
                 cursor = to_block
                 self.storage.set_state("last_processed_block", str(cursor))
                 self.stats["last_backfill_block"] = cursor
+                if throttled:
+                    await asyncio.sleep(scan_interval)
             except Exception:
                 await asyncio.sleep(2)
 
@@ -2870,14 +3468,19 @@ class VirtualsBot:
                 stats["last_ws_block"] = int(rp.get("last_ws_block", 0))
                 stats["enqueued_txs"] = int(rp.get("enqueued_txs", 0))
                 stats["processed_txs"] = int(rp.get("processed_txs", 0))
+                stats["realtime_pending_txs"] = int(rp.get("pending_txs", 0))
+                stats["realtime_queue_size"] = int(rp.get("queue_size", 0))
                 pending_tx = int(rp.get("pending_txs", 0))
             else:
                 stats["ws_connected"] = False
+                stats["realtime_pending_txs"] = 0
+                stats["realtime_queue_size"] = 0
 
             bf_hb = self.event_bus.get_role_heartbeat("backfill")
             if bf_hb and (now - int(bf_hb["updated_at"]) <= 20):
                 bp = bf_hb.get("payload", {})
                 stats["last_backfill_block"] = int(bp.get("last_backfill_block", 0))
+                stats["backfill_throttled"] = bool(bp.get("backfill_throttled", False))
 
         return web.json_response(
             {
@@ -3264,12 +3867,16 @@ class VirtualsBot:
         enriched: List[Dict[str, Any]] = []
         for row in data:
             spent = Decimal(str(row.get("sum_spent_v_est", "0")))
-            token = Decimal(str(row.get("sum_token_bought", "0")))
-            avg_cost_v = (spent / token) if token > 0 else Decimal(0)
+            token_bought = Decimal(str(row.get("sum_token_bought", "0")))
+            token_sold = Decimal(str(row.get("sum_token_sold", "0")))
+            net_token = token_bought - token_sold
+            avg_cost_v = (spent / token_bought) if token_bought > 0 else Decimal(0)
             fdv_v = avg_cost_v * total_supply
             fdv_usd = (fdv_v * virtual_price_usd) if virtual_price_usd is not None else None
 
             x = dict(row)
+            x["sum_token_sold"] = decimal_to_str(token_sold, 18)
+            x["net_token_bought"] = decimal_to_str(net_token, 18)
             x["avg_cost_v"] = decimal_to_str(avg_cost_v, 18)
             x["breakeven_fdv_v"] = decimal_to_str(fdv_v, 18)
             x["breakeven_fdv_usd"] = (
@@ -3278,6 +3885,33 @@ class VirtualsBot:
             enriched.append(x)
 
         return web.json_response({"project": project, "top": top, "items": enriched})
+
+    async def leaderboard_sells_handler(self, request: web.Request) -> web.Response:
+        project = request.query.get("project")
+        buyer = request.query.get("buyer")
+        if not project:
+            return web.json_response({"error": "project is required"}, status=400)
+        if not buyer:
+            return web.json_response({"error": "buyer is required"}, status=400)
+        try:
+            buyer_norm = normalize_address(str(buyer).strip())
+        except Exception:
+            return web.json_response({"error": "buyer must be valid address"}, status=400)
+
+        try:
+            limit_n = int(request.query.get("limit", "80"))
+        except ValueError:
+            return web.json_response({"error": "limit must be integer"}, status=400)
+        limit_n = max(1, min(limit_n, 300))
+        items = self.storage.query_leaderboard_sell_trades(project, buyer_norm, limit_n)
+        return web.json_response(
+            {
+                "project": project,
+                "buyer": buyer_norm,
+                "count": len(items),
+                "items": items,
+            }
+        )
 
     async def event_delays_handler(self, request: web.Request) -> web.Response:
         project = request.query.get("project")
@@ -3325,6 +3959,7 @@ class VirtualsBot:
         app.router.add_get("/mywallets/{addr}", self.wallet_detail_handler)
         app.router.add_get("/minutes", self.minutes_handler)
         app.router.add_get("/leaderboard", self.leaderboard_handler)
+        app.router.add_get("/leaderboard-sells", self.leaderboard_sells_handler)
         app.router.add_get("/event-delays", self.event_delays_handler)
         app.router.add_get("/project-tax", self.project_tax_handler)
         return app
